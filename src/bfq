@@ -2834,6 +2834,36 @@ declare_collection_print_all() {
 	done
 }
 
+# Collect nested file declarative statements recursively
+collect_lines_recursively() {
+	local file="$1"
+
+	if [[ ! -f "$file" ]]; then
+		echo "Error: File '$file' does not exist." >&2
+		exit 1
+	fi
+
+	while IFS= read -r line; do
+		# Check for functional token
+		has_functional_token "$line"
+		if [[ $? -eq 0 ]]; then
+			local token="$hft_ret_functional_token"
+			local data="$line"
+			((hft_ret_ft_pos++))
+			data="${data:${hft_ret_ft_pos}}"
+
+			if [[ "$token" == "file" ]]; then
+				d "RECURSIVELY GOING INTO FILE" "data" "$data"
+				collect_lines_recursively "$data"
+				continue
+			fi
+		fi
+
+		# Append directly to the global pre_collected_lines
+		pre_collected_lines+=("$line")
+	done <"$file"
+}
+
 #-------------------------------------------------------------------------#
 #                             Main parser loop                            #
 #-------------------------------------------------------------------------#
@@ -2870,6 +2900,7 @@ linekey_parser_wrapped() {
 	local captured_output_collection=()
 	local captured_output_collection_trim_state=()
 	local comment_line
+
 	while IFS= read -r line; do
 
 		local comment_line=${line#"${line%%[![:space:]]*}"}
@@ -2885,208 +2916,231 @@ linekey_parser_wrapped() {
 		# sends all data to the parser and does not allow for evaluating of any contained directives.
 		# Parser is in two parts: 1) handle operators, 2) handle regular lines
 
-		# Even when collecting lines for a `declare`, we watch out for `include` inside it.
-		has_functional_token "$line"
-		if [[ $? -eq 0 ]]; then
-			# Functional token found
-			functional_token="$hft_ret_functional_token"
+		# Fixing the bug
+		# Build internal loop to handle collected collection from (possibly) nested file declaratives
+		# So... if file::/path/to/file is encountered, it reads all of its content, and nested file::... declaratives, put it all in an array with all its content flat
+		# Process that here as a sidetrack of our ordinary processing of the original configuration file of the above while IFS= read -r line; do
+		while true; do
 
-			# Cut out the whole operator part from the line, and we can procede as usual
-			((hft_ret_ft_pos++))
-			line="${line:${hft_ret_ft_pos}}"
-			functional_data="$line"
+			# if we have in pre_collected_lines then take next of it and use as line
 
-			d "functional_token" "$functional_token"
-			d "line" "$line"
-			case "$functional_token" in
+			if [[ ${#pre_collected_lines[@]} -gt 0 ]]; then
+				line="${pre_collected_lines[0]}"
+				pre_collected_lines=("${pre_collected_lines[@]:1}")
+			fi
 
-			# Since a `declare` always mapps out any includes when collecting, it will practically allow chaining of includes
-			# declare::x::
-			# data1
-			# :
-			# declare::y::
-			# include::x
-			# :
-			# declare::z::
-			# include::y
-			# :
-			#
-			# The above produces the declared data:
-			# data1
-			#
-			# Even this is possible:
-			# declare::z2::
-			# include::y
-			# include::x
-			# :
-			#
-			# The above example produces the declared data:
-			# data1
-			# data1
-			#
-			"parser")
+			# Even when collecting lines for a `declare`, we watch out for `include` inside it.
+			has_functional_token "$line"
+			if [[ $? -eq 0 ]]; then
+				# Functional token found
+				functional_token="$hft_ret_functional_token"
 
-				case "$functional_data" in
-				"sleep")
-					ctx_parser_sleeping=true
-					;;
-				"awake")
-					ctx_parser_sleeping=false
-					;;
-				esac
-				continue
-				;;
+				# Cut out the whole operator part from the line, and we can procede as usual
+				((hft_ret_ft_pos++))
+				line="${line:${hft_ret_ft_pos}}"
+				functional_data="$line"
 
-			"include")
-				d "GOING INTO INCLUDE" "functional_data" "$functional_data"
+				d "functional_token" "$functional_token"
+				d "line" "$line"
+				case "$functional_token" in
 
-				d "__--__----------------------------__--__"
-				# We are encountering an include line during normal parsing (not in a declare functional token)
-				local include_id="$functional_data"
-				declare_collection_get "$include_id"
-				# Loop trouhg dcg_ret_declare_collection and parse each line
-				for include_line in "${dcg_ret_declare_collection[@]}"; do
-					# pass this to the parser, it will treat it as naturally ocurring line.
-					d "Inserting by INCLUDE case 2" "include_line" "$include_line"
-					parser_parse_line "$include_line"
-				done
+				# Since a `declare` always mapps out any includes when collecting, it will practically allow chaining of includes
+				# declare::x::
+				# data1
+				# :
+				# declare::y::
+				# include::x
+				# :
+				# declare::z::
+				# include::y
+				# :
+				#
+				# The above produces the declared data:
+				# data1
+				#
+				# Even this is possible:
+				# declare::z2::
+				# include::y
+				# include::x
+				# :
+				#
+				# The above example produces the declared data:
+				# data1
+				# data1
+				#
+				"parser")
 
-				# Now go past the include line and continue
-				continue
-
-				;;
-			"declare")
-
-				# Parse the declare_data, which is in syntax of ordinary line, to get eventual literal terminator
-				parse_single_line "$functional_data"
-				d "PARSE" "ret_token_order" "$ret_token_order" "ret_primary_token1" "$ret_primary_token1" "ret_primary_token2" "$ret_primary_token2"
-				d "RETX" " $ret_token_order"
-				case "$ret_token_order" in
-
-				"icc")
-					ctx_parser_nesting_stack_lt+=("$DEFAULT_LT")
-					ctx_parser_functional_token_declare_id="$ret_primary_token1"
-					;;
-
-				"iclc")
-					ctx_parser_functional_token_declare_id="$ret_primary_token1"
-					ctx_parser_nesting_stack_lt+=("$ret_primary_token2")
-					;;
-				"icl")
-					# Single line literal
-					parse_single_line "$functional_data"
-
-					output_collection_collect_line_for_output "$ret_primary_token2" false
-					#
-					# Do not go down or its treated as multi-line literal
+					case "$functional_data" in
+					"sleep")
+						ctx_parser_sleeping=true
+						;;
+					"awake")
+						ctx_parser_sleeping=false
+						;;
+					esac
 					continue
 					;;
-				*)
-					echo "Error: Invalid declare syntax. Must be icc or iclc." >&2
-					return 1
+
+				"include")
+					d "GOING INTO INCLUDE" "functional_data" "$functional_data"
+
+					d "__--__----------------------------__--__"
+					# We are encountering an include line during normal parsing (not in a declare functional token)
+					local include_id="$functional_data"
+					declare_collection_get "$include_id"
+					# Loop trouhg dcg_ret_declare_collection and parse each line
+					for include_line in "${dcg_ret_declare_collection[@]}"; do
+						# pass this to the parser, it will treat it as naturally ocurring line.
+						d "Inserting by INCLUDE case 2" "include_line" "$include_line"
+						parser_parse_line "$include_line"
+					done
+
+					# Now go past the include line and continue
+					continue
+
+					;;
+				"declare")
+
+					# Parse the declare_data, which is in syntax of ordinary line, to get eventual literal terminator
+					parse_single_line "$functional_data"
+					d "PARSE" "ret_token_order" "$ret_token_order" "ret_primary_token1" "$ret_primary_token1" "ret_primary_token2" "$ret_primary_token2"
+					d "RETX" " $ret_token_order"
+					case "$ret_token_order" in
+
+					"icc")
+						ctx_parser_nesting_stack_lt+=("$DEFAULT_LT")
+						ctx_parser_functional_token_declare_id="$ret_primary_token1"
+						;;
+
+					"iclc")
+						ctx_parser_functional_token_declare_id="$ret_primary_token1"
+						ctx_parser_nesting_stack_lt+=("$ret_primary_token2")
+						;;
+					"icl")
+						# Single line literal
+						parse_single_line "$functional_data"
+
+						output_collection_collect_line_for_output "$ret_primary_token2" false
+						#
+						# Do not go down or its treated as multi-line literal
+						continue
+						;;
+					*)
+						echo "Error: Invalid declare syntax. Must be icc or iclc." >&2
+						return 1
+						;;
+					esac
+
+					ctx_parser_functional_token_processing_state=$STATE_FUNCTIONAL_TOKEN_COLLECT_FOR_DECLARE
+					ctx_parser_state="$STATE_COLLECT_LINES_INSIDE_LITERAL"
+					output_collection_set "captured_output_collection" "captured_output_collection_trim_state"
+					d "starting for" "ctx_parser_functional_token_declare_id" "$ctx_parser_functional_token_declare_id"
+					continue
+					;;
+
+				"file")
+
+					d "GOING INTO FILE" "functional_data" "$functional_data"
+					# Get the collection
+
+					# Check if the file exists
+					if [[ ! -f "$functional_data" ]]; then
+						echo "Error: File '$functional_data' does not exist." >&2
+						exit 1
+					fi
+
+					# # Read lines from the file and process them
+					# while IFS= read -r include_line; do
+					# 	d "Inserting by FILE" "include_line" "$include_line"
+					# 	# Pass this to the parser, it will treat it as part of the declare.
+					# 	parser_parse_line "$include_line"
+					# done <"$functional_data"
+					# #ctx_parser_functional_token_processing_state=$STATE_FUNCTIONAL_TOKEN_INACTIVE
+					# # Now go past the include line and continue
+
+					# Clear array for colleciton
+					pre_collected_lines=()
+					collect_lines_recursively "$functional_data"
+
+					continue
+
+					;;
+				"base64-decode")
+					# NOTE:
+					# Not implemented
+					#
+					# The code starts to reach its limits for accepable complexity.
+					# The limited features of Bash makes it a bit hard to implement base64 decoding of output without cluttering the code with flags and if-else cases.
+					#
+					# As is now, we have:
+					#  a state machine for parsing a single line to determine the type of line,
+					#  a state machine for parsing multiple lines, in sequence, of different types (like collecting a multi-line literal)
+					#  a small state machine for parsing functional tokens (include/declare)
+					#
+					# What complicates it is, the decoding must happen just before the output of it,
+					# as bash can not handle binary.
+					#
+					# To solve this cleanly, we would perhaps need another state machine for processing the output and make a cleaner interface for collecting output in such a way that it also can mark what output is to be decoded and how (single line base64 or multi-line base64)
+					#
+					# The quick not so clean solution to implement it:
+					# Go to STATE_COLLECT_LINES_INSIDE_LITERAL
+					# and at output_collection_add_lines_from_temp_with_regard_to_trimming
+					# take note of index in output collection it is inserted, and where the insert ends.
+					# Then at output stage, looping trough output collection, if we are within the range of the base64-decode, then process it as such.
+					# When noting the index at output_collection_add_lines_from_temp_with_regard_to_trimming, we should also note the index of the base64-decode,
+					# also keep track if it is explicit or not. Explicit is to be sent whole to base64 decoder, not decoded line by line.
+					#
+					# Single line literal, multi-line literal, multi-line explicit literal, all need to handle base64 for full implementation.
+					#
+					# This would perhaps be worht implementing for a parser written in another language with which has better features for structuring code. A parser written in another language would be worth writing for sake of processing speed.
 					;;
 				esac
-
-				ctx_parser_functional_token_processing_state=$STATE_FUNCTIONAL_TOKEN_COLLECT_FOR_DECLARE
-				ctx_parser_state="$STATE_COLLECT_LINES_INSIDE_LITERAL"
-				output_collection_set "captured_output_collection" "captured_output_collection_trim_state"
-				d "starting for" "ctx_parser_functional_token_declare_id" "$ctx_parser_functional_token_declare_id"
-				continue
-				;;
-
-			"file")
-
-				d "GOING INTO FILE" "functional_data" "$functional_data"
-				# We are not in a functional token span, so we can process the include
-				# Get the ID of the collection to include
-				local include_id="$functional_data"
-				# Get the collection
-
-				# Check if the file exists
-				if [[ ! -f "$functional_data" ]]; then
-					echo "Error: File '$functional_data' does not exist." >&2
-					exit 1
-				fi
-
-				# Read lines from the file and process them
-				while IFS= read -r include_line; do
-					d "Inserting by FILE" "include_line" "$include_line"
-					# Pass this to the parser, it will treat it as part of the declare.
-					parser_parse_line "$include_line"
-				done <"$functional_data"
-				#ctx_parser_functional_token_processing_state=$STATE_FUNCTIONAL_TOKEN_INACTIVE
-				# Now go past the include line and continue
-				continue
-
-				;;
-			"base64-decode")
-				# NOTE:
-				# Not implemented
-				#
-				# The code starts to reach its limits for accepable complexity.
-				# The limited features of Bash makes it a bit hard to implement base64 decoding of output without cluttering the code with flags and if-else cases.
-				#
-				# As is now, we have:
-				#  a state machine for parsing a single line to determine the type of line,
-				#  a state machine for parsing multiple lines, in sequence, of different types (like collecting a multi-line literal)
-				#  a small state machine for parsing functional tokens (include/declare)
-				#
-				# What complicates it is, the decoding must happen just before the output of it,
-				# as bash can not handle binary.
-				#
-				# To solve this cleanly, we would perhaps need another state machine for processing the output and make a cleaner interface for collecting output in such a way that it also can mark what output is to be decoded and how (single line base64 or multi-line base64)
-				#
-				# The quick not so clean solution to implement it:
-				# Go to STATE_COLLECT_LINES_INSIDE_LITERAL
-				# and at output_collection_add_lines_from_temp_with_regard_to_trimming
-				# take note of index in output collection it is inserted, and where the insert ends.
-				# Then at output stage, looping trough output collection, if we are within the range of the base64-decode, then process it as such.
-				# When noting the index at output_collection_add_lines_from_temp_with_regard_to_trimming, we should also note the index of the base64-decode,
-				# also keep track if it is explicit or not. Explicit is to be sent whole to base64 decoder, not decoded line by line.
-				#
-				# Single line literal, multi-line literal, multi-line explicit literal, all need to handle base64 for full implementation.
-				#
-				# This would perhaps be worht implementing for a parser written in another language with which has better features for structuring code. A parser written in another language would be worth writing for sake of processing speed.
-				;;
-			esac
-
-		fi
-
-		if [[ "$ctx_parser_sleeping" == "true" ]]; then
-			continue
-		fi
-
-		# Parse ordinary lines
-		# If we had functional token, we have extracted that and now
-		# have the rest of the line as an ordinary line
-		parser_parse_line "$line"
-
-		# Functional token processing
-		if [[ $ctx_parser_functional_token_processing_state -eq $STATE_FUNCTIONAL_TOKEN_COLLECT_FOR_DECLARE ]]; then
-			# Did the parser state for parsing ordinary lines change
-			if [[ "$ctx_parser_state" == $STATE_DETERMINE_CONTEXT ]]; then
-				# We have reached the end of the functional token `include` span
-				ctx_parser_functional_token_processing_state=$STATE_FUNCTIONAL_TOKEN_INACTIVE
-
-				output_collection_unset
-				d "print captured_output_collection"
-				# print captured_output_collection
-				# TODO: set in declare_collection_set
-				d "FINISHED AAND TO SET ctx_parser_functional_token_declare_id" "$ctx_parser_functional_token_declare_id"
-				declare_collection_set "$ctx_parser_functional_token_declare_id" "captured_output_collection"
-				# test get and loop print it
-				d "DONE COLLECTING FOR DECLARE" "ctx_parser_functional_token_declare_id" "$ctx_parser_functional_token_declare_id"
-				d " PRINTING IT"
-				declare_collection_get "$ctx_parser_functional_token_declare_id"
-				for test_line in "${dcg_ret_declare_collection[@]}"; do
-					d "test_line" "$test_line"
-				done
-				ctx_parser_temp_collection=()
-				local captured_output_collection=()
 
 			fi
 
-		fi
+			if [[ "$ctx_parser_sleeping" == "true" ]]; then
+				continue
+			fi
+
+			# Parse ordinary lines
+			# If we had functional token, we have extracted that and now
+			# have the rest of the line as an ordinary line
+			parser_parse_line "$line"
+
+			# Functional token processing
+			if [[ $ctx_parser_functional_token_processing_state -eq $STATE_FUNCTIONAL_TOKEN_COLLECT_FOR_DECLARE ]]; then
+				# Did the parser state for parsing ordinary lines change
+				if [[ "$ctx_parser_state" == $STATE_DETERMINE_CONTEXT ]]; then
+					# We have reached the end of the functional token `include` span
+					ctx_parser_functional_token_processing_state=$STATE_FUNCTIONAL_TOKEN_INACTIVE
+
+					output_collection_unset
+					d "print captured_output_collection"
+					# print captured_output_collection
+					# TODO: set in declare_collection_set
+					d "FINISHED AAND TO SET ctx_parser_functional_token_declare_id" "$ctx_parser_functional_token_declare_id"
+					declare_collection_set "$ctx_parser_functional_token_declare_id" "captured_output_collection"
+					# test get and loop print it
+					d "DONE COLLECTING FOR DECLARE" "ctx_parser_functional_token_declare_id" "$ctx_parser_functional_token_declare_id"
+					d " PRINTING IT"
+					declare_collection_get "$ctx_parser_functional_token_declare_id"
+					for test_line in "${dcg_ret_declare_collection[@]}"; do
+						d "test_line" "$test_line"
+					done
+					ctx_parser_temp_collection=()
+					local captured_output_collection=()
+
+				fi
+
+			fi
+			if [[ ${#pre_collected_lines[@]} -gt 0 ]]; then
+				# If we have more pre_collected_lines, we need to process them with our internal loop before going to next line in original file we are processing
+				continue
+			fi
+			# Break our interanl loop as we have no pre_collected_lines, we have processed all or we had none
+			break
+
+		done
 	done
 	if [[ $ctx_parser_key_was_found == "false" && $ctx_parser_target_key != "" ]]; then
 		echo "Error: Key '$ctx_parser_target_key' not found." >&2
