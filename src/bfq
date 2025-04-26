@@ -1,5 +1,7 @@
 #!/bin/bash
 
+VERBOSE=0
+
 # TODO: Ensure meta introducer cant have space in between!
 rotate_color() {
 	local r=$1
@@ -120,6 +122,9 @@ declare -A col_types_map   # Key = type, Value = space-separated list of 0/1 (te
 declare -A max_columns_map # Key = type, Value = integer (max columns seen so far)
 
 d() {
+	if [[ "$VERBOSE" -eq 0 ]]; then
+		return
+	fi
 	#	local text_color
 	#	local the_type="$1"
 	#	# Hash the first argument into a 256-color range
@@ -1747,9 +1752,9 @@ linekey_parser() {
 		# ... which perhaps should be included as a function or something
 		# No thats not correct, don't add it for now...
 		buffer="$(echo "$input_data" | linekey_parser_wrapped "$key")"
-		echo "___ Buffer out ___" >&2
-		echo ">>>$buffer<<<" >&2
-		echo "_____________" >&2
+		#echo "___ Buffer out ___" >&2
+		#echo ">>>$buffer<<<" >&2
+		#echo "_____________" >&2
 
 		status=$?
 		# if status code not 0, return
@@ -3211,6 +3216,24 @@ linekey_parser_wrapped() {
 #                         Command line interaction                        #
 #-------------------------------------------------------------------------#
 
+# Parse options
+while [[ "$1" == -* ]]; do
+	case "$1" in
+	-v)
+		VERBOSE=1
+		shift
+		;;
+	*)
+		echo "Unknown option: $1" >&2
+		exit 1
+		;;
+	esac
+done
+
+if [[ $# -eq 0 ]]; then
+	d "No keys given" >&2
+	exit 0
+fi
 d "linekey_parser" "$@"
 d "Number of keys: $#"
 if [[ $# -eq 0 ]]; then
@@ -3222,6 +3245,7 @@ fi
 if [ ! -t 0 ]; then
 
 	# If no arg is supplied, default to print a colorized parsing of the input data
+	#TODO: This is a relic to be removed
 	cat | linekey_parser "${@:-""}"
 elif [ $# -ge 1 ]; then
 	if [[ $# -eq 1 && -f "$1" ]]; then
