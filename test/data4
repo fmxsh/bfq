@@ -1,0 +1,33 @@
+"test":
+abc
+abc
+123/test "abc"
+
+
+key:
+	"abc":
+	the file is a line
+	this is a line 2
+	/abc	
+	:test
+
+	/test	
+.key
+
+
+key "as":
+	"abc":
+	the file is a line
+	this is a line 2
+	/abc	
+	:test
+
+	/test
+
+
+	"test":
+		
+	/test
+
+	no  "" and no : after, if "" then value, if "":
+/as

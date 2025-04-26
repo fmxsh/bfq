@@ -1,0 +1,8 @@
+declare::my template::
+    key1: value1
+    key2: value2
+.
+
+include::my template
+
+

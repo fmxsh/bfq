@@ -1,0 +1,72 @@
+# CASE
+
+key "val"
+
+# CASE
+
+key: val
+
+# CASE
+
+key:
+val/key
+
+# CASE
+
+key:
+val
+/key
+
+# CASE
+
+key "delim":
+val
+delim
+
+# CASE
+
+key "delim":
+val
+/delim
+
+# CASE
+
+key "delim":
+val/delim
+
+
+
+# Multi-line keys
+
+# CASE
+
+"mlkey":
+key part1
+key part2/mlkey "null":
+val
+/null
+
+# CASE
+
+"mlkey":
+key part1
+key part2/mlkey: val
+
+# CASE
+
+"mlkey":
+key part1
+key part2/mlkey:
+val
+mlkey
+
+# CASE
+
+"mlkey":
+key part1
+key part2/mlkey:
+	:"ml string delim"
+		value
+	/ml string delim
+/mlkey
+

@@ -1,0 +1,14 @@
+::END1:
+    ,
+    .
+END1
+:END2:
+    comma
+    dot
+END2
+
+
+key:MYEND:
+    value1
+    value2.MYEND
+

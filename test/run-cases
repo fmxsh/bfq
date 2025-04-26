@@ -1,0 +1,33 @@
+#!/bin/bash
+
+# Ensure two arguments are provided
+if [[ $# -ne 2 ]]; then
+	echo "Usage: $0 <file> <case_number>"
+	exit 1
+fi
+
+file="$1"
+case_number="$2"
+
+# Ensure the file exists
+if [[ ! -f "$file" ]]; then
+	echo "Error: File '$file' not found."
+	exit 1
+fi
+
+# Ensure case_number is a valid number
+if ! [[ "$case_number" =~ ^[0-9]+$ ]]; then
+	echo "Error: Case number must be a valid integer."
+	exit 1
+fi
+
+# Extract the requested case while skipping the "# CASE" line
+awk -v case_num="$case_number" '
+    BEGIN { case_count = 0; found = 0 }
+    /^# CASE/ { 
+        case_count++; 
+        found = (case_count == case_num) ? 1 : 0;
+        next;  # Skip the "# CASE" line
+    }
+    found { print }
+' "$file"

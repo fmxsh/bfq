@@ -1,0 +1,3190 @@
+#!/bin/bash
+
+# TODO: Ensure meta introducer cant have space in between!
+rotate_color() {
+	local r=$1
+	local g=$2
+	local b=$3
+	local shift_degrees=$4
+
+	# Ensure all values are valid numbers
+	if [[ -z "$r" || -z "$g" || -z "$b" || -z "$shift_degrees" ]]; then
+		echo "Error: Missing RGB values or shift factor!" >&2
+		echo "0 0 0" # Fallback to black
+		return 1
+	fi
+
+	# Convert RGB to HSV
+	local max=$((r > g ? (r > b ? r : b) : (g > b ? g : b)))
+	local min=$((r < g ? (r < b ? r : b) : (g < b ? g : b)))
+	local delta=$((max - min))
+
+	local h=0
+	local s=0
+	local v=$max # Value (brightness)
+
+	if ((delta > 0)); then
+		if ((max == r)); then
+			h=$((((g - b) * 60 / delta + 360) % 360))
+		elif ((max == g)); then
+			h=$((((b - r) * 60 / delta + 120) % 360))
+		else
+			h=$((((r - g) * 60 / delta + 240) % 360))
+		fi
+		s=$((delta * 100 / max)) # Saturation in percentage
+	fi
+
+	# Shift the hue circularly
+	h=$(((h + shift_degrees) % 360))
+
+	# Convert HSV back to RGB
+	local c=$((v * s / 100))
+	local x=$((c * (60 - ((h % 120) * 60 / 60)) / 60))
+	local m=$((v - c))
+
+	local r1=0 g1=0 b1=0
+	case $((h / 60)) in
+	0)
+		r1=$c
+		g1=$x
+		b1=0
+		;;
+	1)
+		r1=$x
+		g1=$c
+		b1=0
+		;;
+	2)
+		r1=0
+		g1=$c
+		b1=$x
+		;;
+	3)
+		r1=0
+		g1=$x
+		b1=$c
+		;;
+	4)
+		r1=$x
+		g1=0
+		b1=$c
+		;;
+	5)
+		r1=$c
+		g1=0
+		b1=$x
+		;;
+	esac
+
+	# Ensure RGB values are clamped within 0-255
+	local new_r=$((r1 + m))
+	local new_g=$((g1 + m))
+	local new_b=$((b1 + m))
+
+	if ((new_r < 0)); then new_r=0; elif ((new_r > 255)); then new_r=255; fi
+	if ((new_g < 0)); then new_g=0; elif ((new_g > 255)); then new_g=255; fi
+	if ((new_b < 0)); then new_b=0; elif ((new_b > 255)); then new_b=255; fi
+
+	# Print RGB values (instead of ANSI sequence)
+	echo "$new_r $new_g $new_b"
+}
+
+bright_color() {
+	local r=$1
+	local g=$2
+	local b=$3
+	local factor=$4
+
+	# Ensure factor is a number
+	if [[ ! "$factor" =~ ^[0-9]+$ ]]; then
+		echo "Error: Factor must be a number!" >&2
+		return 1
+	fi
+
+	# Brighten each component (increase toward 255)
+	r=$((r + ((255 - r) * factor / 100)))
+	g=$((g + ((255 - g) * factor / 100)))
+	b=$((b + ((255 - b) * factor / 100)))
+
+	# Clamp values to 0-255
+	if ((r > 255)); then r=255; elif ((r < 0)); then r=0; fi
+	if ((g > 255)); then g=255; elif ((g < 0)); then g=0; fi
+	if ((b > 255)); then b=255; elif ((b < 0)); then b=0; fi
+
+	# Print raw R G B values (space-separated)
+	echo "$r $g $b"
+}
+
+declare -A col_widths_map  # Key = type, Value = space-separated list of widths
+declare -A col_types_map   # Key = type, Value = space-separated list of 0/1 (text/num)
+declare -A max_columns_map # Key = type, Value = integer (max columns seen so far)
+
+d() {
+	#	local text_color
+	#	local the_type="$1"
+	#	# Hash the first argument into a 256-color range
+	#	local hash=$(echo -n "$1" | cksum | awk '{print $1}')
+	#	text_color=$((hash % 256))
+	#
+	#	# Escape sequence for 256-color text
+	#	local color_code="\033[38;5;${text_color}m"
+	#	local reset_code="\033[0m"
+
+	local text_color
+	local the_type="$1"
+
+	# Hash the first argument into a 256-color range
+	local hash=$(echo -n "$1" | cksum | awk '{print $1}')
+	text_color=$((hash % 256))
+
+	# Convert text_color (0-255) into RGB values
+	local r=$(((text_color * 47) % 256))
+	local g=$(((text_color * 89) % 256))
+	local b=$(((text_color * 123) % 256))
+
+	# Create ANSI 24-bit color escape sequence (true color mode)
+	local color_code="\033[38;2;${r};${g};${b}m"
+
+	# ANSI reset code
+	local reset_code="\033[0m"
+
+	# Store all arguments in an array
+	local args=("$@")
+	local num_cols=${#args[@]}
+	local reset_needed=0 # Flag for when a reset is required
+	local i=0
+	# Loop trough all args and set empty ones to -
+	for ((i = 0; i < num_cols; i++)); do
+		if [[ -z "${args[$i]}" ]]; then
+			args[$i]="-"
+		fi
+	done
+
+	local -a col_widths=()
+	local -a col_types=()
+	local -i max_columns=0
+
+	# If there's something stored, read it back into arrays
+	if [[ -n "${col_widths_map[$the_type]}" ]]; then
+		IFS=' ' read -r -a col_widths <<<"${col_widths_map[$the_type]}"
+	fi
+	if [[ -n "${col_types_map[$the_type]}" ]]; then
+		IFS=' ' read -r -a col_types <<<"${col_types_map[$the_type]}"
+	fi
+	if [[ -n "${max_columns_map[$the_type]}" ]]; then
+		max_columns=${max_columns_map[$the_type]}
+	fi
+
+	# Check if columns have shrunk; if so, reset widths and types
+	if ((num_cols < max_columns)); then
+		reset_needed=1
+	fi
+
+	# Update max column count
+	if ((num_cols > max_columns)); then
+		max_columns=$num_cols
+	fi
+
+	# Determine the max width for each column dynamically
+	for ((i = 0; i < num_cols; i++)); do
+		local len=${#args[$i]}
+		local is_number=0
+
+		# Detect if argument is a number
+		if [[ "${args[$i]}" == "-" || "${args[$i]}" =~ ^[0-9]+$ ]]; then
+			is_number=1
+		fi
+
+		# Check if the column type has changed
+		if [[ -n "${col_types[$i]}" && "${col_types[$i]}" -ne "$is_number" ]]; then
+			reset_needed=1
+		fi
+
+		# If resetting, clear widths and types
+		if [[ "$reset_needed" -eq 1 ]]; then
+			unset col_widths
+			unset col_types
+			declare -a col_widths
+			declare -a col_types
+			reset_needed=0
+		fi
+
+		# Store max width per column
+		if [[ -z "${col_widths[$i]}" || "${col_widths[$i]}" -lt "$len" ]]; then
+			col_widths[$i]=$len
+		fi
+
+		# Store column type (0 = text, 1 = number)
+		col_types[$i]=$is_number
+	done
+
+	# --- Store updated arrays back into the associative arrays ---
+	col_widths_map[$the_type]="${col_widths[*]}"
+	col_types_map[$the_type]="${col_types[*]}"
+	max_columns_map[$the_type]=$max_columns
+
+	# Generate the dynamic format string
+	local format_string=""
+	for ((i = 0; i < num_cols; i++)); do
+		if [[ "$i" -eq 0 || "${col_types[$i]}" -eq 1 ]]; then
+			format_string+="%${col_widths[$i]}s " # Right-align numbers and first column
+		else
+			format_string+="%-${col_widths[$i]}s " # Left-align text
+		fi
+	done
+	format_string="${format_string% }" # Trim trailing space
+
+	# Print with color applied
+	# Define escape sequences
+	#
+	local ESC=$'\033'
+	local gray_code="${ESC}[38;5;242m" # Gray brackets
+	local reset_code="${ESC}[0m"
+
+	# Start with the original formatted string
+	local formatted_output
+	formatted_output="$(printf "$format_string" "${args[@]}")"
+
+	# Track position in the formatted string
+	local modified_output="$formatted_output" # Start with original
+	local offset=0                            # To track shifting positions due to added brackets
+
+	# Loop through each argument and modify progressively
+	for i in "${!args[@]}"; do
+		local arg="${args[$i]}"
+
+		# Find the position of `arg` inside `modified_output`, searching after `offset`
+		local pos
+		pos=$(awk -v a="$arg" -v s="${modified_output:offset}" 'BEGIN{print index(s, a)}')
+
+		if ((pos > 0)); then
+			pos=$((pos + offset - 1)) # Adjust relative position
+
+			local pre="${modified_output:0:pos}"
+			local post="${modified_output:pos+${#arg}}"
+
+			# If it's purely digits, *do not* wrap in brackets
+			if [[ "$arg" =~ ^[0-9]+$ || "$arg" == "-" ]]; then
+				if [[ "$arg" =~ ^[0-9]+$ ]]; then
+					# Convert arg to integer
+					local factor=$((arg))
+
+					# First, increase brightness by 20
+					read bright_r bright_g bright_b < <(bright_color "$r" "$g" "$b" 20)
+
+					# Then, rotate the brightened color by `factor` degrees on the color wheel
+					read rotated_r rotated_g rotated_b < <(rotate_color "$bright_r" "$bright_g" "$bright_b" "$factor")
+
+					# Generate a valid ANSI escape sequence with the rotated color
+					local rotated_color_code="\033[38;2;${rotated_r};${rotated_g};${rotated_b}m"
+					# Print the numeric argument using the rotated + brightened color
+					local colored_arg="${rotated_color_code}${arg}${reset_code}"
+				else
+					local colored_arg="${color_code}${arg}${reset_code}"
+				fi
+			else
+				local red="\033[38;2;255;133;193m"   # Brighter pastel pink for "true"
+				local green="\033[38;2;176;242;182m" # Brighter pastel light green for "false"
+				local reset="\033[0m"                # Reset color
+
+				# Only apply color if "true" or "false" is in the string
+				if [[ "$arg" == *false* ]]; then
+					arg="${arg//false/${reset}${red}false${reset}${color_code}}"
+
+				fi
+				if [[ "$arg" == *true* ]]; then
+					arg="${arg//true/${reset}${green}true${reset}${color_code}}"
+
+				fi
+
+				local colored_arg="${gray_code}[${color_code}${arg}${gray_code}]${reset_code}"
+			fi
+
+			# Construct new modified output
+			modified_output="${pre}${colored_arg}${post}"
+
+			# Update offset to prevent duplicate matches
+			((offset = pos + ${#colored_arg}))
+		fi
+	done
+	# Print the final modified string
+	printf "%b\n" "$modified_output" >&2
+}
+
+#d "INFO" "Loading..." "Done"
+#d "ERROR" "File not found" "/etc/config"
+#d "WARN" "Low disk space" "Only 1GB left"
+#d "DEBUG" "Executing task"
+#d "TOTAL" "Requests processed:" 5000
+#d "SCORE" "Final result:" 98
+#d "TOTAL" "Final result:" 98
+#d "LONG_LABEL" "This should stretch dynamically" "1234567890"
+#d "TOTAL" "Final result:" 98
+#d "SHORT" "Just one value" "11"
+#d "SHORT" "Just one value sssssssssssssssss" "11"
+#d "SHORT" "Just one value" "aa"
+#d "SHORT" "Just one value" "bb"
+d "SHORTx" "Just one value" "bb" 1
+d "SHORTx" "Just one value" "bb" 10
+
+d "SHORTx" "Just one value" "bb" 1590
+
+# The LineKey Config parser
+
+# The parser is mostly one big function reading line by line. Thus no internal representation is prepared and only then acted upon.
+# Only where code is reused, or for other reason of simplicity, has it been functionalized.
+# While splitting it up into multiple smaller functions may seem right, its not intuitive. It makes the flow of the parser more difficult to follow.
+# Parser specific flags, counters and values would need to be passed around, not making for a very clear function-interface. More difficult to trace dependency issues when one func changes a value that another func depends on.
+# It would also increase complexity in handling arguments and especially returns with multiple values.
+# I am not interested in building an internal representation of the data, as there are no multi-dimensional associative arrays in Bash, and handling nested arrays would be difficult and would need more complicated non-intuitive solution.
+#
+# This is an interesting case I would want to investigate further what the optimal structure would be.
+
+# NOTE:
+# Good programing is predicated on good data structure.
+# When code becomes complex, see how the data structures can be improved, clarified, better defined.
+# Lack of data structures and types lead to creative but complex solutions.
+# ...
+# Together with datastructures, build an API, meaning, build a clear interface to operate on the data. This, when it serves to offload data manipulation logic, complex or not, from the core logic.
+# Actually, build interfaces that covers all data interactoin. Never operate on data directly.
+# Thus, separate your code into:
+# 0. Identify what are the major concepts, "key managment" "parser" "output", "nesting stack"
+# 1. Define data structures (keys, which further defines key of type 1 and type 2).
+# 1.1 Deliniate what data is mutable and what is immutable.
+# 2. Define manipulation functions to operate on the data (do two keys match, and the matching function handles different types).
+# 3. The programs core logic, that uses the data manipulation functions.
+# 4. Think of how the debug and diagnostics info is going to be presented. Create a mode for that and structure it well rather than relying only on random prints.
+
+# Good programming is predicated on good data structure.
+# When code becomes complex, see how the data structures can be improved, clarified, better defined.
+# Lack of data structures and types leads to creative but complex solutions.
+#
+# Together with data structures, build an API—a clear interface to operate on the data.
+# This serves to offload data manipulation logic (whether complex or not) from the core logic.
+# Actually, build interfaces that cover all data interaction. Never operate on data directly.
+#
+# Thus, separate your code into:
+# 0. Identify the major concepts in the program:
+#    - Examples: "key management", "parser", "output", "nesting stack"
+#
+# 1. Define **data structures** (e.g., keys, which further define key type 1 and key type 2).
+# 1.1 **Clearly delineate mutable vs. immutable data.**
+#
+# 2. Define **data manipulation functions** to operate on the data:
+#    - Example: A function to check if two keys match should handle different key types appropriately.
+#
+# 3. Implement the **program's core logic**, which interacts only with data through manipulation functions.
+#
+# 4. Design how **debugging and diagnostics** will be structured:
+#    - Avoid relying solely on random prints.
+#    - Create a structured debugging mode that can be easily enabled/disabled.
+#
+# ⚡ Encapsulation Principle:
+# The key is *thoughtful encapsulation*—not necessarily wrapping every single interaction
+# but designing **data manipulation functions where it makes sense**.
+# That means:
+# - If a function's logic is tightly coupled to a data structure, encapsulate it within that structure.
+# - If data is frequently accessed in different ways, define a clear interface rather than exposing raw data.
+# - Avoid unnecessary abstraction—keep the API lightweight but **well-defined**.
+
+#-------------------------------------------------------------------------#
+#                              Data and states                            #
+#-------------------------------------------------------------------------#
+
+# General
+## Immutable data
+readonly TYPE_UNSPECIFIED=0
+readonly TYPE_SLV=1  # Single-line
+readonly TYPE_MLV=2  # Multi-line
+readonly TYPE_MLVL=3 # Multi-line with literal line terminator
+readonly TYPE_SLK=4  # Single-line key
+readonly TYPE_MLKL=5 # Multi-line key
+
+# Parser
+
+readonly DEFAULT_LT="."
+
+readonly STATE_DETERMINE_CONTEXT=0
+
+readonly STATE_SKIP_LINES_INSIDE_IDENTIFIER_OR_LITERAL=1
+readonly STATE_COLLECT_LINES_INSIDE_LITERAL=2
+readonly STATE_COLLECT_LINES_INSIDE_IDENTIFIER=3
+readonly STATE_EVALUATE_MULTI_LINE_IDENTIFIER=4
+readonly STATE_IGNORE_BLOCK_COMMENT=5
+
+reset_ctx_parser() {
+	# Parser
+	## Mutable data
+	declare -g ctx_parser_state=$STATE_DETERMINE_CONTEXT
+	declare -g ctx_parser_nesting_stack_lt=()
+	declare -g ctx_parser_temp_collection=()
+	declare -g ctx_parser_ml_literal_collection=()
+	declare -g ctx_parser_ml_identifier_collection=()
+	declare -g ctx_parser_key_was_found=false
+	declare -g ctx_parser_debug_mode=false
+	declare -g ctx_collecting_multi_line_literal=false
+	# NOTE: This is reset every round of linekey_parser_wrapped
+	# Only if the very last line is explicit, do we way special action, so its correct.
+	# TODO: Rename this to show it targets literal.., and explicit literal is wrong name, should be explicit terminator
+	declare -g ctx_parser_last_line_was_explicit_literal_terminator=false
+	declare -g ctx_parser_has_explicit_literal_terminator_for_identifier=false
+	# TODO: May not be needed
+	declare -g ctx_has_multi_line_literal_collection=false
+	declare -g ctx_parser_sleeping=false
+}
+
+reset_ctx_user() {
+	declare -g ctx_user_given_key_type=$TYPE_UNKNOWN
+	declare -g ctx_user_given_key_data="" # Holds the parsed key, either string or array
+}
+reset_ctx_output() {
+	# Query output
+	## Mutable data
+	declare -g ctx_output_collection=()
+	declare -g ctx_output_should_line_be_trimmed=()
+	declare -g ctx_output_found_single_line_value=false
+	declare -g ctx_output_no_newline_at_end=false
+}
+reset_ctx_current_line() {
+	## Mutable data
+	declare -g ctx_current_identifier=""
+	declare -g ctx_current_literal=""
+	declare -g ctx_current_token_order=""
+	declare -g ctx_current_line=""
+}
+
+#-------------------------------------------------------------------------#
+#                              Callback system                            #
+#-------------------------------------------------------------------------#
+
+# NOTE:
+# We never use the event thing here. Solved in other way.
+
+# NOTE:
+# We do not need the ability to register several handlers for the same event.
+# It would be a normal feature, but our use is only very limited at the moment.
+
+# States
+
+# NOTE:
+# Many more states would be needed for consistency, but our use is very limited.
+# We have declare, include and base64
+
+# readonly EVENT_DONE_COLLECTING_MULTI_LINE_IDENTIFIER=0
+readonly EVENT_DONE_COLLECTING_MULTI_LINE_LITERAL=1
+readonly EVENT_DONE_COLLECTING_SINGLE_LINE_LITERAL=2
+readonly EVENT_BEFORE_PRINTING_COLLECTED_DATA=3
+
+# Declare an associative array to store event handlers
+declare -A event_handlers
+
+# Function to register an event handler
+register_event_handler() {
+	local event_id="$1"
+	local handler="$2"
+
+	# Store the handler function name in the associative array
+	event_handlers["$event_id"]="$handler"
+}
+
+# Function to trigger an event
+trigger_event() {
+	local event_id="$1"
+
+	# Check if the event has a registered handler
+	if [[ -n "${event_handlers[$event_id]}" ]]; then
+		local handler="${event_handlers[$event_id]}"
+		"$handler" "$event_id" # Call the handler function
+	else
+		echo "No handler registered for event $event_id"
+	fi
+}
+
+# Example handler functions
+on_before_printing_collected_data() {
+	echo "Handling EVENT_BEFORE_PRINTING_COLLECTED_DATA"
+}
+
+on_multi_line_literal() {
+	echo "Handling EVENT_DONE_COLLECTING_MULTI_LINE_LITERAL"
+}
+
+on_single_line_literal() {
+	echo "Handling EVENT_DONE_COLLECTING_SINGLE_LINE_LITERAL"
+}
+
+# Register event handlers
+register_event_handler "$EVENT_BEFORE_PRINTING_COLLECTED_DATA" "on_before_printing_collected_data"
+register_event_handler "$EVENT_DONE_COLLECTING_MULTI_LINE_LITERAL" "on_multi_line_literal"
+register_event_handler "$EVENT_DONE_COLLECTING_SINGLE_LINE_LITERAL" "on_single_line_literal"
+
+# Trigger events
+#trigger_event "$EVENT_BEFORE_PRINTING_COLLECTED_DATA"
+#trigger_event "$EVENT_DONE_COLLECTING_MULTI_LINE_LITERAL"
+#trigger_event "$EVENT_DONE_COLLECTING_SINGLE_LINE_LITERAL"
+
+#-------------------------------------------------------------------------#
+#                                  Helpers                                #
+#-------------------------------------------------------------------------#
+
+# transform 1,3,5 to "1 2 3 5"
+generate_range_numbers() {
+	local input="$1"
+	local groups
+	local output=()
+	local key="$2"
+
+	# Split by semicolons to process each group
+	IFS=';' read -r -a groups <<<"$input"
+
+	for group in "${groups[@]}"; do
+		if [[ "$group" == *","* ]]; then
+			# Handle ranges defined by commas
+			IFS=',' read -r start end <<<"$group"
+			if ((end < start)); then
+				# End range is less than start range
+				return 1
+			fi
+			for ((i = start; i <= end; i++)); do
+				output+=("$i")
+			done
+		else
+			# Handle single numbers
+			output+=("$group")
+		fi
+	done
+
+	# Bubble sort the output array in ascending order
+	local n=${#output[@]}
+	for ((i = 0; i < n; i++)); do
+		for ((j = 0; j < n - i - 1; j++)); do
+			if ((output[j] > output[j + 1])); then
+				# Swap values
+				temp=${output[j]}
+				output[j]=${output[j + 1]}
+				output[j + 1]=$temp
+			fi
+		done
+	done
+
+	# Print sorted values as a space-separated string
+	echo "${output[*]}"
+}
+
+# translate 'key:' to "key "key"' BUT only if no non-whitespace characters are after the colon
+function replace_shorthand_with_real_syntax1() {
+	local line="$1"
+
+	# Return globals
+	declare -g ret_constructed_line=""
+	declare -g ret_is_valid=false
+
+	# If the line contains any double quotes, return the original line as invalid.
+	if [[ "$line" == *\"* ]]; then
+		ret_constructed_line="$line"
+		ret_is_valid=false
+		return 1
+	fi
+
+	# We'll accumulate the key in this variable
+	local ret_extracted_key=""
+
+	local i=0
+	local char=""
+	local in_leading_whitespace=true
+	local reading_key=false
+	local colon_found=false
+	local length=${#line}
+
+	# Loop over each character in the line
+	for ((i = 0; i < length; i++)); do
+		char="${line:i:1}"
+
+		# Skip leading whitespace until first non-whitespace
+		if [[ "$in_leading_whitespace" == "true" ]]; then
+			if [[ "$char" =~ [[:space:]] ]]; then
+				continue
+			else
+				# Found first non-whitespace, start reading key
+				in_leading_whitespace=false
+				reading_key=true
+				ret_extracted_key+="$char"
+				continue
+			fi
+		fi
+
+		# If we are reading the key, keep reading until colon
+		if [[ "$reading_key" == "true" ]]; then
+			if [[ "$char" == ":" ]]; then
+				# Found the colon, stop reading the key
+				reading_key=false
+				colon_found=true
+				break
+			else
+				ret_extracted_key+="$char"
+			fi
+		fi
+	done
+
+	# Trim trailing whitespace from the extracted key
+	while [[ "$ret_extracted_key" =~ [[:space:]]$ ]]; do
+		ret_extracted_key="${ret_extracted_key%[[:space:]]}"
+	done
+
+	# If a colon was found, check if there's only whitespace after it
+	if [[ "$colon_found" == "true" ]]; then
+		local after_colon="${line#*:}"                               # Extract text after `:`
+		after_colon="${after_colon#"${after_colon%%[![:space:]]*}"}" # Trim leading whitespace
+
+		if [[ -z "$after_colon" ]]; then
+			# Only whitespace after colon -> Transform `key:` → `key "key":`
+			ret_is_valid=true
+			ret_constructed_line="${ret_extracted_key} \"${ret_extracted_key}\":"
+			return 0
+		fi
+	fi
+
+	# Otherwise, return the original line unchanged
+	ret_is_valid=false
+	ret_constructed_line="$line"
+	return 1
+}
+
+#
+#
+# Old version, in case the chat msessed something up
+#function replace_shorthand_with_real_syntax1() {
+#	local line="$1"
+#
+#	# Return globals
+#	declare -g ret_constructed_line=""
+#	declare -g ret_is_valid=false
+#
+#	# If the line contains any double quotes, return the original line as invalid.
+#	if [[ "$line" == *\"* ]]; then
+#		ret_constructed_line="$line"
+#		ret_is_valid=false
+#		return 1
+#	fi
+#
+#	# We'll accumulate the key in this variable
+#	local ret_extracted_key=""
+#
+#	local i=0
+#	local char=""
+#	local in_leading_whitespace=true
+#	local reading_key=false
+#	local colon_found=false
+#	local length=${#line}
+#
+#	# Loop over each character in the line
+#	for ((i = 0; i < length; i++)); do
+#		char="${line:i:1}"
+#
+#		# Skip leading whitespace until first non-whitespace
+#		if [[ "$in_leading_whitespace" == true ]]; then
+#			if [[ "$char" =~ [[:space:]] ]]; then
+#				continue
+#			else
+#				# Found first non-whitespace, start reading key
+#				in_leading_whitespace=false
+#				reading_key=true
+#				ret_extracted_key+="$char"
+#				continue
+#			fi
+#		fi
+#
+#		# If we are reading the key, keep reading until colon
+#		if [[ "$reading_key" == true ]]; then
+#			if [[ "$char" == ":" ]]; then
+#				# Found the colon, stop reading the key
+#				reading_key=false
+#				colon_found=true
+#				break
+#			else
+#				ret_extracted_key+="$char"
+#			fi
+#		fi
+#	done
+#
+#	# Trim trailing whitespace from the extracted key
+#	while [[ "$ret_extracted_key" =~ [[:space:]]$ ]]; do
+#		ret_extracted_key="${ret_extracted_key%[[:space:]]}"
+#	done
+#
+#	# Validate and construct the new line if a key and colon were found
+#	if [[ -n "$ret_extracted_key" && "$colon_found" == true ]]; then
+#		ret_is_valid=true
+#		# Construct the line as:   KEY "KEY":
+#		ret_constructed_line="${ret_extracted_key} \"${ret_extracted_key}\":"
+#	else
+#		# Otherwise, invalid or no colon -> just pass back the original line
+#		ret_is_valid=false
+#		ret_constructed_line="$line"
+#	fi
+#}
+
+# fixes 'key "value' to 'key "value"'
+function replace_shorthand_with_real_syntax2() {
+	local line="$1"
+
+	# Return variables
+	declare -g ret_constructed_line2=""
+	declare -g ret_is_valid2=false
+
+	local original_line="$line"
+
+	local key=""
+	local value=""
+
+	# States
+	local in_leading_whitespace=true
+	local reading_key=false
+	local found_quote=false
+	local reading_value=false
+
+	local length=${#line}
+	local i=0
+	local char
+
+	# Character-by-character parsing
+	for ((i = 0; i < length; i++)); do
+		char="${line:i:1}"
+
+		# 1) Skip leading whitespace
+		if [[ "$in_leading_whitespace" == "true" ]]; then
+			if [[ "$char" =~ [[:space:]] ]]; then
+				continue
+			else
+				in_leading_whitespace=false
+				reading_key=true
+				key+="$char"
+				continue
+			fi
+		fi
+
+		# 2) Reading the key (including any spaces) until we see the first quote
+		if [[ "$reading_key" == "true" ]]; then
+			if [[ "$char" == '"' ]]; then
+				# We've encountered our one-and-only quote
+				reading_key=false
+				found_quote=true
+				reading_value=true
+				continue
+			else
+				# Accumulate everything into the key
+				key+="$char"
+				continue
+			fi
+		fi
+
+		# 3) If we already found the quote, we are now reading the value
+		if [[ "$reading_value" == "true" ]]; then
+			if [[ "$char" == '"' ]]; then
+				# A second quote found => fail (exactly one quote expected)
+				ret_constructed_line2="$original_line"
+				ret_is_valid2=false
+				return 1
+			else
+				value+="$char"
+			fi
+		fi
+	done
+
+	# Post-loop validations:
+
+	# Must have found exactly one quote
+	if [[ "$found_quote" == "false" ]]; then
+		# No quote => invalid
+		ret_constructed_line2="$original_line"
+		ret_is_valid2=false
+		return 1
+	fi
+
+	# Won't need this, space between key and `"` doesn't matter by our syntax
+	## Trim trailing whitespace from key
+	#while [[ "$key" =~ [[:space:]]$ ]]; do
+	#	key="${key%[[:space:]]}"
+	#done
+
+	# If key is empty, invalid
+	if [[ -z "$key" ]]; then
+		ret_constructed_line2="$original_line"
+		ret_is_valid2=false
+		return 1
+	fi
+
+	# Trim leading and trailing whitespace from value
+	# Leading
+	value="${value#"${value%%[![:space:]]*}"}"
+	# Trailing
+	value="${value%"${value##*[![:space:]]}"}"
+
+	# Construct final line: key "value"
+
+	#ret_constructed_line2="${key} \"${value}\""
+	ret_constructed_line2="${key}\"${value}\""
+	ret_is_valid2=true
+	return 0
+}
+# fixes 'key: value' to 'key: "value"', but not 'key:' to 'key: ""'
+function replace_shorthand_with_real_syntax3() {
+	local line="$1"
+
+	# Return variables
+	declare -g ret_constructed_line3=""
+	declare -g ret_is_valid3=false
+
+	# Trim leading/trailing whitespace
+	line="${line#"${line%%[![:space:]]*}"}"
+	line="${line%"${line##*[![:space:]]}"}"
+
+	# Ensure there is exactly one colon
+	if [[ "$line" != *:* ]]; then
+		ret_constructed_line3="$line"
+		ret_is_valid3=false
+		return 1
+	fi
+
+	local key="${line%%:*}"
+	local value="${line#*:}"
+
+	# Trim whitespace from key
+	key="${key%"${key##*[![:space:]]}"}"
+
+	# Trim leading whitespace from value (ignore trailing)
+	value="${value#"${value%%[![:space:]]*}"}"
+
+	# If value is empty (only whitespace after `:`), do not modify
+	if [[ -z "$value" ]]; then
+		ret_constructed_line3="$line"
+		ret_is_valid3=false
+		return 1
+	fi
+
+	# Ensure value is enclosed in quotes
+	if [[ ! "$value" =~ ^\".*\"$ ]]; then
+		value="\"$value\""
+	fi
+
+	# Construct final line
+	ret_constructed_line3="${key}: ${value}"
+	ret_is_valid3=true
+	return 0
+}
+
+find_last_valid_colon() {
+	local input_string="$1"
+	local position="$2" # Do not count i or lower
+	local delimiter=":"
+
+	declare -g flvc_pos=-1 # Global variable to store result
+
+	local str_len=${#input_string}
+	local index=$((str_len - 1))
+	local seen_non_whitespace=false
+
+	# Ignore trailing whitespace
+	while ((index >= 0)); do
+		if [[ "${input_string:index:1}" =~ [^[:space:]] ]]; then
+			seen_non_whitespace=true
+			break # Stop if any non-whitespace is found before the `:`
+		fi
+		((index--))
+	done
+
+	# Start searching for `:` from the last non-whitespace position
+	while ((index >= 0)); do
+		d "input_string:index:1" "${input_string:index:1}" "index" $index
+		if ((index < position)); then
+			break # Stop if we reach `i` or lower
+		fi
+
+		if [[ "${input_string:index:1}" == "$delimiter" ]]; then
+			flvc_pos=$index
+			return 0 # Found valid `:`
+		fi
+
+		if [[ "${input_string:index:1}" =~ [^[:space:]] ]]; then
+			return 1 # Found a non-whitespace character before `:`, stop
+		fi
+
+		((index--))
+	done
+
+	return 1 # No valid `:` found
+}
+
+has_functional_token() {
+	local input="$1"
+	hft_ret_functional_token=""
+	hft_ret_ft_pos=-1 # Default to -1 if no functional token is found
+
+	local i=0
+	local length=${#input}
+	local first_colon=-1
+	local second_colon=-1
+	local found_non_whitespace_before=0 # Must have at least one non-whitespace before `::`
+	local found_non_whitespace_after=0  # Must have at least one non-whitespace after `::`
+
+	# Loop through the string character by character
+	while [[ $i -lt $length ]]; do
+		local char="${input:$i:1}"
+
+		if [[ "$char" == ":" && $second_colon -eq -1 ]]; then
+			if [[ $first_colon -eq -1 ]]; then
+				# First colon found, mark its position
+				first_colon=$i
+			else
+				# Found second colon, this marks `::`
+				second_colon=$i
+				hft_ret_ft_pos=$i
+
+				# Extract the functional token (everything before first `:`)
+				hft_ret_functional_token="${input:0:first_colon}"
+
+				# Trim leading/trailing whitespace
+				hft_ret_functional_token="${hft_ret_functional_token#"${hft_ret_functional_token%%[![:space:]]*}"}"
+				hft_ret_functional_token="${hft_ret_functional_token%"${hft_ret_functional_token##*[![:space:]]}"}"
+
+				# If no non-whitespace before `::`, fail immediately
+				if [[ -z "$hft_ret_functional_token" ]]; then
+					return 1 # Fail because no valid token before `::`
+				fi
+			fi
+		elif [[ $second_colon -ne -1 ]]; then
+			# After detecting `::`, check for a non-whitespace character (including extra `:`)
+			if [[ ! "$char" =~ [[:space:]] ]]; then
+				found_non_whitespace_after=1
+				break # Stop checking, we found a valid char after `::`
+			fi
+
+		elif [[ ! "$char" =~ [[:space:]] && "$first_colon" -ne -1 ]]; then
+			# non-whitespace before second quote, fail
+			return 1
+		elif [[ ! "$char" =~ [[:space:]] ]]; then
+			# Found a non-whitespace character before `::`
+			found_non_whitespace_before=1
+		fi
+
+		((i++))
+	done
+
+	# Fail if either condition is not met
+	if [[ $second_colon -ne -1 && $found_non_whitespace_before -eq 1 && $found_non_whitespace_after -eq 1 ]]; then
+		return 0 # Functional token found
+	fi
+
+	return 1 # No functional token found
+}
+
+# Test the parse_line_for_key function
+#replace_shorthand_with_real_syntax 'abc:'
+#
+#echo "extracted_key: $ret_extracted_key"
+#echo "constructed_line: $ret_constructed_line"
+#parse_key_value_line 'abc "          aba asdd sadlkasd las3432lrkewr343 4          '
+#echo "key: $ret_constructed_line"
+#exit
+
+# Input:
+# $line
+#
+# Output:
+# $extracted_key
+# $value
+# $trailing
+# $type [multi-line | single-line] or it is empty if not syntasticly valid
+# $is_zero_selector [true | false]
+# TODO: Update this description
+#
+#
+# NOTE:: Use values global at the parrent scope (the caller), return values trough globals.
+# We do not pass values as args and returns. Minimize all form of passing around our values.
+# This to reduce cases of our data being modified by accident by expansion etc.
+# We have complicated special characters possible in our args and returns.
+# ret 0 - syntax is valud
+# ret 1 - syntax is invalid
+function parse_single_line() {
+
+	local line="$1"
+	d "line" "$line"
+	#replace_shorthand_with_real_syntax1 "$line"
+	#line="$ret_constructed_line"
+
+	#TODO: remove this syntax?
+	#replace_shorthand_with_real_syntax2 "$line"
+	#line="$ret_constructed_line2"
+
+	#replace_shorthand_with_real_syntax3 "$line"
+	#line="$ret_constructed_line3"
+
+	# Possible syntax:
+	# Declare all possible return types as global variables with enumerated values
+	declare -g SINGLE_LINE_IDENTIFIER_WITH_MULTI_LINE_ASSIGNMENT_WITH_IDENTIFIER_AS_VT=0
+	declare -g SINGLE_LINE_IDENTIFIER_AND_ASSIGNMENT=1
+	declare -g MULTI_LINE_IDENTIFIER_WITH_MULTI_LINE_ASSIGNMENT_WITH_IDENTIFIER_VT_AS_ASSIGNMENT_VT=2
+	declare -g MULTI_LINE_ASSIGNMENT_WITHOUT_IDENTIFIER_AND_SINGLE_LINE_ASSIGNMENT_AS_VT=3
+	declare -g SINGLE_LINE_IDENTIFIER_WITH_MULTI_LINE_ASSIGNMENT_WITH_SINGLE_LINE_ASSIGNMENT_AS_VT=4
+	declare -g MULTI_LINE_IDENTIFIER_WITH_MULTI_LINE_ASSIGNMENT_WITH_SINGLE_LINE_ASSIGNMENT_AS_VT=5
+	declare -g SINGLE_LINE_ASSIGNMENT_WITHOUT_IDENTIFIER=6
+	declare -g SINGLE_LINE_UNSPECIFIED=7
+
+	# Return values
+	# TODO: Clear out all not needed
+	declare -g ret_syntax_type=$SINGLE_LINE_UNSPECIFIED
+	declare -g ret_assignment=""
+	declare -g ret_identifier=""
+
+	declare -g ret_span_indicator_after_assignment=false
+	declare -g ret_span_indicator_before_assignment=false
+	declare -g ret_span_indicator_to_the_left_of_assignment=false
+	declare -g ret_span_indicator_after_identifier=false
+
+	declare -g ret_functional_token=""
+	declare -g ret_primary_token1=""
+	declare -g ret_primary_token2=""
+	declare -g ret_token_order=""
+
+	local st_collect_primary_token1=false
+	local st_collect_primary_token2=false
+	local st_ctx_collect_primary_token_first_run=false
+	local st_ctx_collect_primary_token_first_char_found=false
+	local st_primary_token_count=0
+
+	# Parts of the syntax
+	local pt_identifier=""
+	local pt_assignment=""
+
+	local pt_primary_token1=""
+	local pt_primary_token2=""
+
+	local pt_collect_primary_token1=""
+	local pt_collect_primary_token2=""
+
+	# State of the parser
+	local st_primitive_found=false
+	local st_assignment_found=false
+
+	local st_span_indicator_after_identifier=false
+	local st_span_indicator_after_identifier_before_assignment=false
+	local st_lonely_span_indicator=false
+	local st_span_indicator_after_identifier_and_assignment=false
+	local st_span_indicator_after_assignment=false
+	local st_span_before_assignment=false
+	local st_span_indicator_at_start=false
+	local empty_quote_count=0
+
+	local collected_key=""
+
+	# Contexts of the parser
+	local CTX_DETERMINE_CONTEXT=0
+	local CTX_COLLECT_PRIMARY_TOKEN=1
+	local CTX_COLLECT_STRING_LITERAL=3
+	local CTX_COLLECT_EMPTY_QUOTE=4
+
+	local current_state=$CTX_DETERMINE_CONTEXT
+
+	# Classification
+	# i - identifier
+	# c - Contextual Meta-Symbol
+	# l - literal
+	# p - primary token, either identifier or literal, early in parsing we can not know
+	local token_order=""
+
+	# Example block comment start and end (set dynamically)
+	block_comment_start="/-"
+	block_comment_end="-/"
+
+	local trimmed_line=""
+	local length=0
+	local token_order=""
+
+	# Trim leading and trailing whitespace
+	trimmed_line=${line#"${line%%[![:space:]]*}"}
+	trimmed_line=${trimmed_line%"${trimmed_line##*[![:space:]]}"}
+
+	length=${#trimmed_line}
+	start_length=${#block_comment_start}
+	end_length=${#block_comment_end}
+
+	if [[ $length -ge $((start_length > end_length ? start_length : end_length)) ]]; then
+		if [[ "${trimmed_line:0:start_length}" == "$block_comment_start" ]]; then
+			token_order+="B"
+		fi
+		if [[ "${trimmed_line:length-end_length:end_length}" == "$block_comment_end" ]]; then
+			token_order+="b"
+		fi
+	fi
+
+	# if token order not empty
+	if [[ -n "$token_order" ]]; then
+		ret_token_order="$token_order"
+		return 0
+	fi
+
+	local i=0
+	# Find first character to determine starting context
+	for ((i = 0; i < ${#line}; i++)); do
+
+		char="${line:i:1}"
+		next_char="${line:i+1:1}"
+		if [[ "$char" == [[:space:]] ]]; then
+			continue
+
+		elif [[ "$char" == '"' ]]; then
+
+			# Empty quote in start has special meaning
+			if [[ "$next_char" == '"' ]]; then
+				# We have the assignment
+				current_state=$CTX_COLLECT_EMPTY_QUOTE
+				((i--)) # So the current char gets collected
+				break
+			elif [[ "$next_char" == ':' ]]; then
+				token_order+="q"
+			else
+				# We have the identifier
+				token_order+="l"
+				st_collect_primary_token1=true
+				st_primary_token_count=1
+				current_state=$CTX_COLLECT_STRING_LITERAL
+				break
+			fi
+
+		elif [[ "$char" == ':' ]]; then
+			((i--)) # So the current char gets collected
+			current_state=$CTX_DETERMINE_CONTEXT
+
+			break
+		else
+			#
+			# Evaluate of its operator
+			# any other character is primary token 1
+			# Any other character in beginning is start of primitive token (we do not yet know what it is, id... or lit...)
+			st_collect_primary_token1=true
+			st_primary_token_count=1
+			token_order+="p"
+
+			current_state=$CTX_COLLECT_PRIMARY_TOKEN
+			((i--)) # So the current char gets collected
+			break
+		fi
+
+	done
+
+	((i++)) # Because we `break` out of the loop, we need to increment the index
+
+	# Do the rest of the parsing
+	for (( ; i < ${#line}; i++)); do
+		char="${line:i:1}"
+
+		case $current_state in
+
+		$CTX_DETERMINE_CONTEXT)
+			if [[ "$char" == [[:space:]] ]]; then
+				continue
+			fi
+			if [[ "$char" == '"' ]]; then
+
+				token_order+="l"
+
+				current_state=$CTX_COLLECT_STRING_LITERAL
+
+				if [[ "$st_collect_primary_token1" == "false" ]]; then
+					st_collect_primary_token1=true
+					st_primary_token_count=1
+				elif [[ "$st_collect_primary_token1" == "true" ]]; then
+					st_collect_primary_token2=true
+					st_primary_token_count=2
+				fi
+
+				continue
+			fi
+			if [[ "$char" == ':' ]]; then
+
+				token_order+="c"
+
+				continue
+			fi
+			# We have the identifier
+			token_order+="p"
+			current_state=$CTX_COLLECT_PRIMARY_TOKEN
+			st_ctx_collect_primary_token_first_run=true
+
+			if [[ "$st_collect_primary_token1" == "false" ]]; then
+				st_collect_primary_token1=true
+				st_primary_token_count=1
+			elif [[ "$st_collect_primary_token2" == "false" ]]; then
+				st_collect_primary_token2=true
+				st_primary_token_count=2
+			fi
+
+			((i--)) # So the current char gets collected
+			continue
+
+			;;
+
+		$CTX_COLLECT_EMPTY_QUOTE)
+			if [[ "$char" == [[:space:]] ]]; then
+				if [[ $empty_quote_count -eq 1 ]]; then
+					# No content inside allowed
+					current_state=$CTX_DETERMINE_CONTEXT
+					echo "Error: Empty quote not allowed" >&2
+					return 1
+				fi
+				# if 0 or 2, space prior "" is allowed
+				continue
+			fi
+
+			if [[ "$char" == '"' ]]; then
+				# We have the assignment
+				((empty_quote_count++))
+			fi
+			if [[ $empty_quote_count -eq 2 ]]; then
+				# End of ""
+				token_order+="e"
+				current_state=$CTX_DETERMINE_CONTEXT
+				continue
+			fi
+			;;
+
+		$CTX_COLLECT_PRIMARY_TOKEN)
+
+			# No, trim it at end instead, or with this we cut spaces in the middle of the identifier
+			#if [[ "$char" == [[:space:]] ]]; then
+			#	continue
+			#fi
+
+			if [[ "$st_ctx_collect_primary_token_first_char_found" == "false" ]]; then
+				if [[ "$char" == '"' ]]; then
+					# We have the assignment
+					current_state=$CTX_COLLECT_STRING_LITERAL
+					# First encounter of `"` after whitespace after : triggers CTX_COLLECT_STRING_LITERAL,
+					# any possible subsequent " are part of the primary token regardless of if inside `"` or not.
+					continue
+				fi
+			fi
+			if [[ "$st_primary_token_count" -eq 1 ]]; then
+
+				if [[ "$char" == '"' ]]; then
+					# We have the assignment
+					echo "Error: Can not have \" in identifier" >&2
+					continue
+				fi
+				if [[ "$char" == ':' ]]; then
+					# Look ahead to check if another ':' appears before '"' or end of line
+					local lookahead_found=false
+					local j=0
+					# Do not count the last one, which if it exists, is part of syntax, always...
+					local stop_at=0
+					find_last_valid_colon "$line" $i
+					if [[ $? -eq 1 ]]; then
+						stop_at=${#line}
+					else
+						stop_at=$flvc_pos
+					fi
+					for ((j = i + 1; j < ${#line}; j++)); do
+						if ((j >= stop_at)); then
+							break # Stop looping if we reach stop_at
+						fi
+						next_char="${line:j:1}"
+
+						if [[ "$next_char" == ':' ]]; then
+							lookahead_found=true
+							break
+						elif [[ "$next_char" == '"' ]]; then
+							break # Stop looking ahead once `"` is found
+						fi
+					done
+
+					if [[ "$lookahead_found" == "false" ]]; then
+						token_order+="c"
+						# We found the end of the identifier
+						#trim the identifier of leading and trailing whitespace
+						pt_collect_primary_token1="${pt_collect_primary_token1#"${pt_collect_primary_token1%%[![:space:]]*}"}"
+						pt_collect_primary_token1="${pt_collect_primary_token1%"${pt_collect_primary_token1##*[![:space:]]}"}"
+
+						st_primary_token_count=2
+						current_state=$CTX_DETERMINE_CONTEXT
+						# We have the assignment
+						if [[ "$st_collect_primary_token1" == "true" ]]; then
+							pt_collect_primary_token1="${pt_collect_primary_token1%"${pt_collect_primary_token1##*[![:space:]]}"}"
+						elif [[ "$st_collect_primary_token2" == "true" ]]; then
+
+							pt_collect_primary_token2="${pt_collect_primary_token2%"${pt_collect_primary_token2##*[![:space:]]}"}"
+						fi
+						continue
+					fi
+
+				fi
+			elif [[ "$st_primary_token_count" -eq 2 ]]; then
+				if [[ "$char" == ':' ]]; then
+					token_order+="c"
+					current_state=$CTX_DETERMINE_CONTEXT
+					continue
+				fi
+			fi
+			#
+			# Prevent `"` after first character to trigger CTX_COLLECT_STRING_LITERAL.
+			st_ctx_collect_primary_token_first_char_found=true
+			if [[ "$st_collect_primary_token2" == "true" ]]; then
+				pt_collect_primary_token2+="$char"
+			elif [[ "$st_collect_primary_token1" == "true" ]]; then
+				pt_collect_primary_token1+="$char"
+			fi
+
+			;;
+		$CTX_COLLECT_STRING_LITERAL)
+			# special attention to extract the string literal
+			# example input: "value" : "value"
+			# so parse till we find the last " before `:` outside `"` or before the end.
+			if [[ "$char" == '"' ]]; then
+				# Look ahead to see if we have a `:` or `\n`
+				local j=0
+				local char2=""
+				local is_end_of_string_literal=false
+				local is_done=false
+				for ((j = i + 1; j < ${#line}; j++)); do
+					char2="${line:j:1}"
+
+					if [[ "$char2" == '"' ]]; then
+						# Current $char is not the end of the string literal
+						is_end_of_string_literal=false
+						is_done=true
+						break
+					fi
+				done
+				if [[ "$is_done" == "false" ]]; then
+					# No more " found before end. We found the end of the string literal
+					is_end_of_string_literal=true
+				fi
+				if [[ "$is_end_of_string_literal" == "true" ]]; then
+					# We found the end of the string literal
+					current_state=$CTX_DETERMINE_CONTEXT
+					continue
+				fi
+				# The " we found is part of the string literal
+
+			fi
+
+			if [[ "$st_collect_primary_token2" == "true" ]]; then
+				pt_collect_primary_token2+="$char"
+			elif [[ "$st_collect_primary_token1" == "true" ]]; then
+				pt_collect_primary_token1+="$char"
+			fi
+			;;
+
+		esac
+
+	done
+
+	## Map out the token types to be more specific from primitives to identifiers and literals
+	## We know what type they are depending on how they occur in the syntax
+	# Define parallel arrays
+	# TODO: Is pclc ever returned or should it have been pcpc? Added pcpc for now.
+	# NOTE: the f* are not implemented yet, but in specification.
+	# TODO: The f* can be stripped out, return corresponding ones without the f,
+	# We can instead have the parser check at end, before output, if there is operator,
+	# if so, process it. or...
+	# "fpcp" "fpcc" "fpcpc" "fccpc" "fecc"
+	# "ficl" "ficc" "ficlc" "fcclc" "fecc"
+	array1=("pcc" "pcl" "pcp" "pclc" "pcpc" "cpc" "pc" "cp" "ccpc" "ecpc")
+	array2=("icc" "icl" "icl" "iclc" "iclc" "clc" "ic" "cl" "cclc" "eclc")
+
+	# Example input value
+	# Loop through array1 to find $x
+	for i in "${!array1[@]}"; do
+		if [[ "${array1[$i]}" == "$token_order" ]]; then
+			token_order="${array2[$i]}" # Replace x with corresponding value from array2
+			break
+		fi
+	done
+
+	#d "token_order" "$token_order"
+	#d "pt_collect_primary_token1" "$pt_collect_primary_token1"
+	#d "pt_collect_primary_token2" "$pt_collect_primary_token2"
+	#d "- - - - - token_order" "$token_order"
+	ret_primary_token1="$pt_collect_primary_token1"
+	ret_primary_token2="$pt_collect_primary_token2"
+	ret_token_order="$token_order"
+	return 0
+	# Evaluate what we have
+
+	# Normalize
+
+	# identifier "assignment"
+	# -> identifier: "assignment"
+
+	#
+	#
+	# TODO: The assignment inherits the VT of the identifier, fixed VT or assigned VT.
+	#
+	#
+	#
+	# Possible mappings (mapping identifier to assignment):
+	#
+	# Basic structure:
+	#
+	# Identifier to left of `:`, assignment to right of `:`.
+	#
+	# The left side is called the identifier-block, the right side is called the assignment-block.
+	# Both the identifier-block and the assignment-block can exist on the same row, then separated by a `:`.
+	#
+	# The identifier-block and the assignment-block can exist on separate rows, defining their own span. Both blocks are joined byh a `:`.
+	#
+	# Both the identifier and assignment block can contain their own `:` as part of their structure.
+	#
+	# Identifier can be single- or multi-line.
+	#
+	# Assignment can be single- or multi-line.
+	#
+	# Any combination of the above is possible.
+	#
+	# Both multi-line identifier and multi-line assignment can be literal or processed.
+	#
+	# A single line assignment can be literal: enclosed in double quotes, then it is a literal string object (not trimmed of leading and trailing whitespace).
+	# A single line assignment can be processed: not enclosed in double quotes, and then it is trimmed of leading and trailing whitespace.
+	#
+	# A multi-line assignment can be literal: its content is as it is given.
+	# A multi-line assignment can be processed: its lines are trimmed of leading and trailing whitespace.
+	#
+	# Multi-line identifier can have fixed VT or VT as assignment VT.
+	#
+	# Multi-line assignment can have fixed VT, assigned vt, or vt of multi-line key.
+	#
+	# A single-line assignment can have and be without an identifier.
+	#
+	# A multi-line assignment can have and be without an identifier.
+	#
+	# Multi-line values with and without identifier can have fixed VT or VT as assignment VT.
+	#
+	# A processed multi-line assignment can contain key-value pairs (then it is an object). It can contain only values (then it is an array).
+
+	# Identifier, assignment, and value terminators can be defined literally or processed.
+
+	# Difference of use of quote and double quote:
+	# Identifier, when quopted uses ', literals uses ".
+	#
+
+	# Single line identifier with multi-line assignment with fixed VT.
+	# icc	identifier::
+	readonly MAPPING_is=0
+
+	# id ::
+	# 	val1
+	# 	val2
+	# :
+
+	# NOTE:
+	# `ec` not possible. To literal without key, just do `l` instead.
+	# `ecc` however is possible as multi-line literal without key.
+
+	# Multi-line identifier and fixed VT.
+	# ccc	:::
+	readonly MAPPING_i=1
+
+	# :::
+	# 	ml-id-val1
+	# 	ml-id-val2
+	# :
+
+	# Multi-line literal with empty identifier.
+	# `e` stands for empty, and means two double quotes.
+	# ecc	""::
+	#
+	# ""::
+	# 	data1
+	# 	data2
+	# :
+	#
+	# Note:
+	# No `ec` is possible, as that would be for single line, and simply `l` is used for that.
+
+	# TODO: Insert this
+	# Multi-line literal without identifier with assignment as LT.
+	# eclc	"":lt:
+	#
+
+	# "":lt:
+	# 	ea
+	# 	eb
+	# lt
+
+	# Multi-line assignment without identifier and fixed VT. (No other thing on line allowed)
+	# cc	::
+	readonly MAPPING_i=1
+
+	# [...]
+	# ::
+	# 	assignment-data1
+	# 	assignment-data2
+	# :
+
+	# Extended functionality mode:
+	# cc	::[directive]
+
+	# Single line identifier and assignment.
+	# icl	identifier: "assignment"
+	readonly MAPPING_isa=1
+
+	# id: "assign"
+
+	# Single line identifier and assignment (object).
+	# icl	identifier: assignment
+	readonly MAPPING_isA=2
+
+	# id: assig
+
+	# Single line identifier with multi-line assignment with single-line assignment as VT.
+	# iclc	identifier "assignment" :
+	readonly MAPPING_ias=3
+
+	# id: "vt":
+	# 	ml-data1
+	# 	ml-data2
+	# :vt
+
+	# NO, NOT TRUE: Multi-line identifier (naturally without identifier on the header line) with single-line assignment as VT.
+	# or, depending on context:
+	# NOT ANYMORE: Multi-line assignment without identifier and single-line assignment as VT.
+	# Follows a multi-line identifier.
+	# Follows only a multi-line identifier and is for defining multi-line literal, with assignment as LT.
+	# NOTE: which one depends on what comes after/was before. If found without previous identifier, it is identifier, else it is assignment.
+	#
+	# clc	:"assignment":
+	readonly MAPPING_as=4
+
+	# Case 1
+	# :"vt":
+	# 	ml-id-val1
+	# 	ml-id-val2
+	# :vt
+	#
+
+	# Not true: Multi-line assignment without identifier and single-line assignment as VT. (Object)
+	# clc	: assignment:
+	readonly MAPPING_sA=7
+
+	# Multi-line identifier with fixed LT.
+	# ccc	"::
+
+	# ::"abc":
+	# 	ml-id-val1
+	# 	ml-id-val2
+	# :
+	# ::
+	# 	value1
+	# 	value2
+	# :
+
+	# Multi-line identifier with literal as LT
+	# cclc	::lt:
+
+	# ::"lt":
+	# or
+	# ::lt:
+
+	# 	ml-id-val1
+	# 	ml-id-val2
+	# lt
+
+	# Single line assignment without identifier.
+	# l	"assignment"
+	readonly MAPPING_a=8
+
+	# Single line assignment without identifier. (Object)
+	# l	assignment
+	readonly MAPPING_A=9
+
+	# Fixed terminators
+	#
+	# :	parsed value terminator (array/object)
+	# ::	literal terminator
+	#
+
+	# Comments
+	# B	/- other text
+	# b    other text -/
+	# BB	// other text
+
+	# Technically:
+	# ic	identifier:	# Empty assignment
+	# cl	:"assignment"	# Empty identifier, just prints the value in an array same as "assignment" would
+	# cl	:assignment	# would print it as object (a trimmed version).
+
+}
+
+#parse_single_line 'key ::'
+#parse_single_line ':'
+#parse_single_line '::'
+#parse_single_line 'key: "value"'
+#parse_single_line 'key: value'
+#parse_single_line 'key: "vt":'
+#parse_single_line ':"vt":'
+#parse_single_line ':vt:'
+#parse_single_line ':'
+#parse_single_line '::'
+#parse_single_line 'key:'
+#parse_single_line ':"assignment"'
+#parse_single_line ':assignment'
+#
+#echo "return: $?"
+#echo "ret_assignemnt: $ret_primary_token1"
+#echo "ret_identifier: $ret_primary_token2"
+#echo "tokord: $ret_token_order"
+#exit
+# Function to test parse_single_line and compare results
+test_parse_single_line() {
+	local input="$1"
+	local expected1="$2"
+	local expected2="$3"
+	local expected_order="$4"
+
+	# Call the function (assuming it modifies global variables)
+	parse_single_line "$input"
+
+	# Compare results
+	echo "Testing input: '$input'"
+
+	if [[ "$ret_primary_token1" == "$expected1" ]]; then
+		echo "  ret_primary_token1 PASSED: '$ret_primary_token1'"
+	else
+		echo "  ret_primary_token1 FAILED: Expected '$expected1', got '$ret_primary_token1'"
+		exit
+	fi
+
+	if [[ "$ret_primary_token2" == "$expected2" ]]; then
+		echo "  ret_primary_token2 PASSED: '$ret_primary_token2'"
+	else
+		echo "  ret_primary_token2 FAILED: Expected '$expected2', got '$ret_primary_token2'"
+		exit
+	fi
+
+	if [[ "$ret_token_order" == "$expected_order" ]]; then
+		echo "  ret_token_order PASSED: '$ret_token_order'"
+	else
+		echo "  ret_token_order FAILED: Expected '$expected_order', got '$ret_token_order'"
+		exit
+	fi
+
+	echo
+}
+
+# Test all possible combinations of the token order
+# Calls to the function with test cases (replace expected values)
+#test_parse_single_line "\"::" "" "" "qcc"
+#test_parse_single_line "key ::" "key" "" "icc"
+#test_parse_single_line ":" "" "" "c"
+#test_parse_single_line "::" "" "" "cc"
+#test_parse_single_line "key: \"value\"" "key" "value" "icl"
+#test_parse_single_line "key: value" "key" "value" "icl"
+#test_parse_single_line "key: \"vt\":" "key" "vt" "iclc"
+#test_parse_single_line ":\"vt\":" "vt" "" "clc"
+#test_parse_single_line ":vt:" "vt" "" "clc"
+#test_parse_single_line ":" "" "" "c"
+#test_parse_single_line "::" "" "" "cc"
+#test_parse_single_line "key:" "key" "" "ic"
+#test_parse_single_line ":\"value\"" "value" "" "cl"
+#test_parse_single_line ":value" "value" "" "cl"
+#test_parse_single_line "\"\":" "" "" "ec"
+#test_parse_single_line "\"\"::" "" "" "ecc"
+#test_parse_single_line "\"\":lt:" "lt" "" "eclc"
+#exit
+# Test the parse_single_line function
+test_parse_single_line() {
+	local line="$1"
+	parse_single_line "$line"
+	echo "return: $?"
+	echo "extracted_key: $ret_key"
+	echo "value: $ret_value"
+	echo "trailing: $ret_trailing"
+	echo "type: $ret_syntax_type"
+	echo "is_zero_selector: $ret_is_zero_selector"
+	echo "multi_line_value_span: $ret_multi_line_value_span"
+	echo "multi_line_value_selector: $ret_multi_line_value_selector"
+	echo "has_multi_line_value_span: $ret_has_multi_line_value_span"
+	echo "has_multi_line_value_selector: $ret_has_multi_line_value_selector"
+	echo "has_multi_line_syntax: $ret_has_multi_line_syntax"
+	echo "syntax_is_valid: $ret_syntax_is_valid"
+	echo "syntax_is_multi_line_key: $ret_syntax_is_multi_line_key"
+	echo "multi_line_key_delimiter: $ret_multi_line_key_delimiter"
+}
+#test_parse_single_line 'key "value" :9:1,2;3'
+#test_parse_single_line '"test" : '
+#exit
+# This function processes all the keys given as argument ("key-group1" "key-group2" "key1") and calls the parser for each,
+# then piping the output back to the parser for the next round.
+linekey_parser() {
+
+	local keys=("$@") # Store all keys
+	local buffer=""
+	local input_data=""
+
+	# Read input data from stdin (only on first call)
+	if [[ -t 0 ]]; then
+		echo "No piped input, waiting..."
+	else
+		input_data=$(cat) # Capture piped input
+	fi
+	# if we have arguments
+	while true; do
+
+		# If no more keys, print the last result and return
+		if [[ ${#keys[@]} -eq 0 ]]; then
+			echo -n "$input_data"
+			return
+		fi
+
+		# Take first key and remove it from the array
+		key="${keys[0]}"
+		keys=("${keys[@]:1}")
+		# Capture output of linekey_parser_wrapped for current key
+
+		# We add an \n because the state machine of ours go line by line,
+		# and if last line is part of a structure that needs another round to process,
+		# we need one more line to trigger that.
+		# NOTE: This is mainly the `STATE..._EVALUATE_...` state.
+		# ... which perhaps should be included as a function or something
+		# No thats not correct, don't add it for now...
+		buffer="$(echo "$input_data" | linekey_parser_wrapped "$key")"
+		echo "___ Buffer out ___" >&2
+		echo ">>>$buffer<<<" >&2
+		echo "_____________" >&2
+
+		status=$?
+		# if status code not 0, return
+		if [[ "$status" -ne 0 ]]; then
+			return "$status"
+		fi
+
+		# If more keys remain, pipe buffer back into the function
+		if [[ ${#keys[@]} -gt 0 ]]; then
+			# Same as below, cut...
+			input_data="${buffer::-1}"
+		else
+			# No more keys left, print final result
+			#printf "%s" "$buffer"
+			# We always have a last char added to prevent shellsubstitution from stripping newlines we want to preserve
+
+			if [[ -n "$buffer" ]]; then
+				printf "%s" "${buffer::-1}"
+			fi
+
+			return 0
+		fi
+	done
+
+}
+
+# Input:
+# $literal_value_terminator
+# $line
+#
+# Output:
+# extracted value returned in global variable ret
+#
+# 0 success, 1 failure
+#
+# Do character by character comparison to find the terminator, to avoid issues with special characters and expansion quirks
+cut_line_by_literal_value_terminator() {
+	local line="$1"
+	local terminator="${DEFAULT_LT}$2"
+
+	# Declare global variable inside the function
+	declare -g clblvt_ret_preceding_data=""
+
+	if [[ -z "$2" ]]; then
+		return 1 # Failure
+	fi
+
+	# Extract everything before the first occurrence of $terminator
+	IFS= read -r -d '' clblvt_ret_preceding_data <<<"${line%%"$terminator"*}"
+	clblvt_ret_preceding_data="${clblvt_ret_preceding_data%$'\n'}"
+
+	# Ensure $terminator exists in $line
+	if [[ "$line" == *"$terminator"* ]]; then
+		# Get everything that comes after the first occurrence of $terminator
+		local after_terminator="${line#*"$terminator"}"
+
+		# Trim leading whitespace from the remaining string
+		after_terminator="${after_terminator#"${after_terminator%%[![:space:]]*}"}"
+
+		# If anything remains after trimming, fail
+		if [[ -n "$after_terminator" ]]; then
+			return 1 # Fail because non-whitespace characters exist after $terminator
+		fi
+
+		return 0 # Success: No extra non-whitespace characters
+	fi
+
+	return 1 # Failure: $terminator not found
+}
+
+has_value_terminator() {
+	local line="$1"
+	local value_terminator="$2"
+
+	declare -g hvt_ret_has_preceding_data=false
+	declare -g hvt_ret_preceding_data=""
+
+	# Ensure the terminator is not empty
+	if [[ -z "$value_terminator" ]]; then
+		return 1 # Failure
+	fi
+
+	trimmed_line=${line#"${line%%[![:space:]]*}"}
+	trimmed_line=${trimmed_line%"${trimmed_line##*[![:space:]]}"}
+
+	# "":: is not considered terminator, even if :: is usually
+	# NOTE: This is obsolete
+	#if [[ "$trimmed_line" =~ ^\"\"[[:space:]]*:[[:space:]]*:[[:space:]]* ]]; then
+	#	return 1
+	#fi
+
+	# Check if the line contains the value terminator
+	# check boh literal version and trimmed version
+	if [[ "$line" == "$value_terminator" || "$trimmed_line" == "$value_terminator" ]]; then
+		return 0 # Success
+	fi
+
+	# Is the terminator on same line as data?
+
+	# Check for literal value terminator
+	cut_line_by_literal_value_terminator "$line" "$value_terminator"
+
+	local found_literal_value_terminator=$?
+	if [[ $found_literal_value_terminator -eq 0 ]]; then
+		# Get the data preceding the terminator
+		hvt_ret_preceding_data="${clblvt_ret_preceding_data%$'\n'}"
+		hvt_ret_has_preceding_data=true
+		return 0
+	fi
+
+	return 1 # Not found
+}
+
+# output_collection_collect_line_for_output() {
+# 	local line="$1"
+# 	local should_line_be_trimmed="$2"
+# 	ctx_output_collection+=("$line")
+# 	ctx_output_should_line_be_trimmed+=("$should_line_be_trimmed")
+# }
+# NOTE:
+# Evolving this to an interface for output buffering.
+# So we can set the output collection, in order to for other code
+# to capture the collection and avoid printing (like PHP's ob_start/ob_get_clean)
+# Global variables to hold alternative output collection and trim state
+__alternative_output_collection=""
+__alternative_output_trim_state=""
+
+output_collection_set() {
+	local collection_name="$1"
+	local trim_state_name="$2"
+
+	__alternative_output_collection="$collection_name"
+	__alternative_output_trim_state="$trim_state_name"
+}
+
+output_collection_unset() {
+	__alternative_output_collection=""
+	__alternative_output_trim_state=""
+}
+
+output_collection_collect_line_for_output() {
+	local line="$1"
+	local should_line_be_trimmed="$2"
+
+	# Default to main collections
+	local target_collection="ctx_output_collection"
+	local target_trim_state="ctx_output_should_line_be_trimmed"
+	d " inside output_collection_collect_line_for_output" "$line" "$should_line_be_trimmed"
+	# If an alternative collection is set, use it
+	if [[ -n "$__alternative_output_collection" ]]; then
+		d "setting alternative collection" "$__alternative_output_collection"
+		target_collection="$__alternative_output_collection"
+	fi
+	if [[ -n "$__alternative_output_trim_state" ]]; then
+		target_trim_state="$__alternative_output_trim_state"
+	fi
+
+	declare -n target_var="$target_collection"
+	declare -n trim_state_var="$target_trim_state"
+
+	target_var+=("$line")
+	trim_state_var+=("$should_line_be_trimmed")
+}
+
+# Because we know if to trim or not only when we find the literal terminator, we have to collect first and trim when we have all output and know its type.
+# Thus, this function accepts destination variable for the output collection
+output_collection_add_lines_from_temp_with_regard_to_trimming() {
+	trim_line="$1"
+
+	local -a local_stack=() # Local stack for tracking nesting
+	local line
+	local i
+	# Print tmmp collection
+	for ((i = 0; i < ${#ctx_parser_temp_collection[@]}; i++)); do
+		d "ctx_parser_temp_collection-" "${ctx_parser_temp_collection[$i]}"
+	done
+	i=0
+	for ((i = 0; i < ${#ctx_parser_temp_collection[@]}; i++)); do
+		local just_opened_span=false
+		local just_closed_span=false
+		local line=${ctx_parser_temp_collection[$i]}
+		parse_single_line "$line"
+
+		case "$ret_token_order" in
+		"ccc" | "ecc" | "icc")
+			local_stack+=("$DEFAULT_LT")
+			just_opened_span=true
+			;;
+		"clc" | "cclc")
+			local literal_terminator="$ret_primary_token1"
+			d "literal_terminator added " "$literal_terminator"
+			local_stack+=("$literal_terminator")
+			just_opened_span=true
+			;;
+		"iclc")
+			local literal_terminator="$ret_primary_token2"
+			local_stack+=("$literal_terminator")
+			just_opened_span=true
+			;;
+			#		"cc")
+			#			local_stack=("${local_stack[@]:0:${#local_stack[@]}-1}")
+			#			just_closed_span=true
+			#			;;
+			#		"c")
+			#			local_stack=("${local_stack[@]:0:${#local_stack[@]}-1}")
+			#			just_closed_span=true
+			#			;;
+		*) ;;
+
+		esac
+
+		if [[ "$just_opened_span" == "false" && ${#local_stack[@]} -gt 0 ]]; then
+			d "local_stack test" "${#local_stack[@]}" "line" "$line"
+			d "literal terminator testted" "${local_stack[-1]}"
+			has_value_terminator "$line" "${local_stack[-1]}" # Check last stack element
+			if [[ $? -eq 0 ]]; then
+
+				local_stack=("${local_stack[@]:0:${#local_stack[@]}-1}")
+				just_closed_span=true
+				d "just_closed_span-------=====" "$just_closed_span"
+			fi
+
+		fi
+		d "local_stack" "${#local_stack[@]}" "line" "$line"
+		# Do not trim open and closings, because closing can be explicit literal terminator
+		# and we need keep data intact.
+		if [[ ${#local_stack[@]} -eq 0 ]]; then
+
+			if [[ "$just_closed_span" == "true" ]]; then
+				local do_trim=false
+			elif [[ "$trim_line" == "true" ]]; then
+				local do_trim=true
+			else
+				local do_trim=false
+			fi
+
+		elif [[ ${#local_stack[@]} -eq 1 ]]; then
+
+			local do_trim=false
+		else
+			local do_trim=false
+		fi
+		d "line" "-> $line" "do_trim $do_trim" "just_opened_span $just_opened_span" "just_closed_span $just_closed_span" "stack level" "${#local_stack[@]}"
+		output_collection_collect_line_for_output "$line" "$do_trim"
+
+	done
+}
+
+#-------------------------------------------------------------------------#
+#                                The parser                               #
+#-------------------------------------------------------------------------#
+
+set_colors() {
+	local theme_choice="$1" # First argument: odd/even for theme selection
+	local use_bright="$2"   # Second argument: true/false for bright colors
+
+	if ((theme_choice % 2 == 1)); then
+		# Odd: Theme 1 (Green & Gray)
+		SYMBOL="\e[0;32m"    # Regular Green (for + and text)
+		SEPARATOR="\e[0;30m" # Regular Dark Gray (for :)
+		LINE="$SYMBOL"       # Same color for SYMBOL and LINE
+	else
+		# Even: Theme 2 (Cyan & Blue)
+		SYMBOL="\e[0;34m"    # Regular Blue (for + and text)
+		SEPARATOR="\e[0;30m" # Regular Dark Gray (for :)
+		LINE="$SYMBOL"       # Same color for SYMBOL and LINE
+	fi
+
+	# Opposite color scheme
+	SYMBOL_OPPOSITE="${SYMBOL/"0;"/"1;"}" # Regular → Bright, Bright → Regular
+	SEPARATOR_OPPOSITE="${SEPARATOR/"0;"/"1;"}"
+	LINE_OPPOSITE="${LINE/"0;"/"1;"}" # Ensure LINE_OPPOSITE matches SYMBOL_OPPOSITE
+
+	# Apply brightness if requested
+	if [[ $use_bright == "true" ]]; then
+		# Hack to prevent syntax highlighting issues in some editors
+		# We avoid writing "${SYMBOL/0;/1;}" directly, which can cause syntax highlighting errors
+		local BRIGHT_REPLACE="1;"
+		local NORMAL_REPLACE="0;"
+
+		SYMBOL="${SYMBOL/$NORMAL_REPLACE/$BRIGHT_REPLACE}"
+		SEPARATOR="${SEPARATOR/$NORMAL_REPLACE/$BRIGHT_REPLACE}"
+		LINE="${LINE/$NORMAL_REPLACE/$BRIGHT_REPLACE}" # Make LINE bright too
+
+		# If already bright, turn the opposite back to regular
+		SYMBOL_OPPOSITE="${SYMBOL_OPPOSITE/$BRIGHT_REPLACE/$NORMAL_REPLACE}"
+		SEPARATOR_OPPOSITE="${SEPARATOR_OPPOSITE/$BRIGHT_REPLACE/$NORMAL_REPLACE}"
+		LINE_OPPOSITE="${LINE_OPPOSITE/$BRIGHT_REPLACE/$NORMAL_REPLACE}"
+	fi
+
+	RESET="\e[0m" # Reset Formatting
+}
+
+trim_and_indent() {
+	local indent_level="$1" # Number of indentation levels (each level = 4 spaces)
+	local input_string="$2" # The input string to process
+
+	# Declare global variable
+	ret_indented_line=""
+
+	# Trim leading whitespace using Bash parameter expansion
+	local trimmed_string="${input_string#"${input_string%%[![:space:]]*}"}"
+
+	# Generate indentation (4 spaces per level)
+	local indent=""
+	for ((i = 0; i < indent_level; i++)); do
+		indent+="---->" # Adds x spaces per level
+	done
+
+	# Store the final result in the global variable
+	ret_indented_line="${indent} ${trimmed_string}"
+}
+
+collect_multi_line_value() {
+	:
+}
+
+process_literal() {
+	local input="$1"
+	declare -g pl_result="" # Global result variable
+
+	# Trim leading and trailing whitespace first
+	local trimmed="${input#"${input%%[![:space:]]*}"}"
+	trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+
+	# Special case: Ignore ""::
+	#	if [[ "$trimmed" == '""::'* ]]; then
+	if [[ "$trimmed" =~ ^\"\"[[:space:]]*:[[:space:]]*:[[:space:]]* ]]; then
+		pl_result="$trimmed"
+		return 0
+	fi
+
+	local length=${#trimmed}
+	local first_char="${trimmed:0:1}"
+	local last_char="${trimmed:length-1:1}"
+
+	# If the first and last characters are quotes, extract the inner content
+	if [[ "$first_char" == "\"" && "$last_char" == "\"" ]]; then
+		pl_result="${trimmed:1:length-2}"
+	else
+		pl_result="$trimmed" # Return the whole trimmed input if not wrapped in quotes
+	fi
+
+	return 0 # Always return success
+}
+
+parser_parse_line() {
+
+	reset_ctx_current_line
+
+	local ctx_current_line="$1"
+	d "CURRENT LINE" "$ctx_current_line"
+	parse_single_line "$ctx_current_line"
+
+	ctx_current_token_order="$ret_token_order"
+	# Primary tokens are just added in order they occur, sort the types out below:
+	case "$ctx_current_token_order" in
+	"clc" | "cclc" | "cl" | "eclc")
+		ctx_current_literal="$ret_primary_token1"
+		;;
+	"l")
+		# TODO: Does this exist? The `l` token order? Is it ever returned from parse_single_line?
+		ctx_current_literal="$ret_primary_token1"
+		;;
+	*)
+
+		ctx_current_identifier="$ret_primary_token1"
+		ctx_current_literal="$ret_primary_token2"
+		;;
+	esac
+
+	local stack_lvl=$((${#ctx_parser_nesting_stack_lt[@]}))
+	local temp_lvl=$((${#ctx_parser_temp_collection[@]}))
+	local output_lvl=$((${#ctx_output_collection[@]}))
+
+	d "Main" "ctx_parser_state" "$ctx_parser_state" "token_order" "$ctx_current_token_order" "identifier" "$ctx_current_identifier" "literal" "$ctx_current_literal" "stack_lvl" "$stack_lvl" "temp_lvl" "$temp_lvl" "output_lvl" $output_lvl "line: $line"
+
+	# NOTE: Not up to date...
+	# ic	Identifier with empty assignment. (Empty field)
+	# icl	Single line identifier and assignment.
+	# icc	Single line identifier with multi-line assignment with fixed VT.
+	# -- uncompleted --
+	# c	Multi-line identifier and fixed VT.
+	# cc	Multi-line assignment without identifier and fixed VT. (No other thing on line allowed) Or: follows multi-line identifier
+	# iclc	Single line identifier with multi-line assignment with single-line assignment as VT
+	# clc	Multi-line identifier (naturally without identifier on the header line) with single-line assignment as VT.
+	# 	or
+	# 	Multi-line assignment without identifier and single-line assignment as VT.
+	# cl	Assignment without indentifier. (Same as just `assignment`)
+
+	case "$ctx_parser_state" in
+	$STATE_DETERMINE_CONTEXT)
+
+		# Skip empty lines and lines with only whitespace
+		if [[ "$ctx_current_line" =~ ^[[:space:]]*$ ]]; then
+			return 0
+		fi
+
+		# Process the line, and any given token order is processed fully, then the next token order is awaited
+		case "$ctx_current_token_order" in
+
+		"B")
+			ctx_parser_state="$STATE_IGNORE_BLOCK_COMMENT"
+			return 0
+			;;
+		"ic")
+
+			# Identifier with empty assignment. (Empty field)
+			# ic 	identifier:
+
+			if [[ "$ctx_current_identifier" == "$ctx_parser_target_key" ]]; then
+				ctx_output_found_single_line_value=true
+				ctx_parser_key_was_found=true
+
+				# Even if empty, we need to collect it, as we may have several empty lines after this
+				# whereas for this value it should show an empty line.
+				output_collection_collect_line_for_output "$ctx_current_literal" true
+				return 0
+			fi
+			;;
+		"icl")
+			# Single line identifier and assignment.
+			# icl	identifier: literal
+			if [[ "$ctx_current_identifier" == "$ctx_parser_target_key" ]]; then
+				ctx_output_found_single_line_value=true
+				ctx_parser_key_was_found=true
+
+				output_collection_collect_line_for_output "$ctx_current_literal" true
+				return 0
+			fi
+
+			;;
+
+		# Multi-line identifier
+		"ccc" | "cclc")
+			ctx_parser_nesting_stack_lt+=()
+
+			# The value terminator for this multi-line identifier
+			if [[ "$ctx_current_token_order" == "ccc" ]]; then
+				ctx_parser_nesting_stack_lt+=("$DEFAULT_LT")
+			elif [[ "$ctx_current_token_order" == "cclc" ]]; then
+				ctx_parser_nesting_stack_lt+=("$ctx_current_literal")
+				#			elif [[ "$ctx_current_token_order" == "clc" ]]; then
+				#				ctx_parser_nesting_stack_lt+=("$ctx_current_literal")
+			fi
+
+			ctx_parser_temp_collection=()
+			ctx_parser_state="$STATE_COLLECT_LINES_INSIDE_IDENTIFIER"
+
+			return 0
+			;;
+		# Multi-line literals
+		"icc" | "ecc" | "iclc" | "clc" | "eclc")
+			# In all cases, we collect multi-line literal
+
+			# The value terminator for this multi-line literal
+			if [[ "$ctx_current_token_order" == "icc" ]]; then
+				d "STACK" "ADD x1" "$DEFAULT_LT"
+				ctx_parser_nesting_stack_lt+=("$DEFAULT_LT")
+			elif [[ "$ctx_current_token_order" == "ec" ]]; then
+				d "STACK" "ADD x0" "$DEFAULT_LT"
+				ctx_parser_nesting_stack_lt+=("$DEFAULT_LT")
+			elif [[ "$ctx_current_token_order" == "ecc" ]]; then
+				d "STACK" "ADD x2" "$DEFAULT_LT"
+				ctx_parser_nesting_stack_lt+=("$DEFAULT_LT")
+			elif [[ "$ctx_current_token_order" == "eclc" ]]; then
+				d "STACK" "ADD x4" "$DEFAULT_LT"
+				ctx_parser_nesting_stack_lt+=("$ctx_current_literal")
+			elif [[ "$ctx_current_token_order" == "iclc" ]]; then
+				d "STACK" "ADD x3" "$ctx_current_literal"
+				ctx_parser_nesting_stack_lt+=("$ctx_current_literal")
+			fi
+
+			if [[ "$ctx_current_identifier" == "$ctx_parser_target_key" ]]; then
+				ctx_parser_nesting_stack_lt+=()
+				ctx_collecting_multi_line_literal=true
+				# key found
+				ctx_parser_key_was_found=true
+				ctx_parser_temp_collection=()
+				ctx_parser_state="$STATE_COLLECT_LINES_INSIDE_LITERAL"
+				return 0
+			else
+				d "NOT FOUND" "ctx_current_identifier" "$ctx_current_identifier" "ctx_parser_target_key" "$ctx_parser_target_key"
+				ctx_parser_nesting_stack_lt+=()
+				ctx_parser_state="$STATE_SKIP_LINES_INSIDE_IDENTIFIER_OR_LITERAL"
+				return 0
+				:
+			fi
+			;;
+		"Bb")
+			# Block comment on a single line
+			d "IGNORED" "line" "$line"
+
+			return 0
+			;;
+		"ec")
+
+			:
+			;;
+		"ecc")
+			:
+			;;
+		"eclc")
+			:
+			;;
+		"iclc")
+			:
+			;;
+		"clci")
+			:
+			;;
+		"clc")
+			:
+			;;
+		*)
+			:
+			;;
+		esac
+
+		;;
+	"$STATE_IGNORE_BLOCK_COMMENT")
+		if [[ "$ctx_current_token_order" == "b" ]]; then
+			ctx_parser_state="$STATE_DETERMINE_CONTEXT"
+			return 0
+		fi
+		d "IGNORED" "line" "$line"
+		return 0
+
+		;;
+	"$STATE_EVALUATE_MULTI_LINE_IDENTIFIER")
+		d "STATE_EVALUATE_MULTI_LINE_IDENTIFIER"
+		# Skip till we have first non-empty line
+		# Skip empty lines and lines with only whitespace
+		if [[ "$ctx_current_line" =~ ^[[:space:]]*$ ]]; then
+			return 0
+		fi
+		# Skipping all empty lines above, will lead us to the start of the multi-line literal (sinble or multi-line), so that's where we currently are at.
+
+		# We may be in state of collecting multi-line identifier or multi-line literal
+		# Literal must follow identifier, but first verify we are interested in this identifier
+		d "Has multi-line identifier collection"
+		# print identifier collection]
+		for ((i = 0; i < ${#ctx_parser_ml_identifier_collection[@]}; i++)); do
+			d "x  ${ctx_parser_ml_identifier_collection[$i]}"
+
+		done
+		# Compare the identifier collection with the target key
+
+		user_key_in_array=()
+		line_buffer=""
+		ended_with_newline=false
+		# HOW LINES ARE SPLIT TO ARRAY FOR COMPARING
+		# Each line stored in is own array element without newline.
+		# A \n at end of line means there is  a next element empty or not in array.
+		#			# For testing if it makes array elements for empty lines
+		#ctx_parser_target_key=$(printf "%s\nx" "$ctx_parser_target_key")
+		#ctx_parser_target_key="${ctx_parser_target_key:0:-1}"
+		#printf "%s" "$ctx_parser_target_key" | od -c >&2
+		for ((i = 0; i < ${#ctx_parser_target_key}; i++)); do
+			char="${ctx_parser_target_key:i:1}" # Extract one character
+
+			printf "char: %s" "$char" | od -c >&2 # Debugging
+
+			if [[ "$char" == $'\n' ]]; then
+				# Push the current line into the array
+				# Do not append the newline character to the line buffer
+				#line_buffer+="$char"
+
+				user_key_in_array+=("$line_buffer") # Store the full line
+				line_buffer=""                      # Reset buffer for the next line
+				ended_with_newline=true
+			else
+				line_buffer+="$char" # Append character to current line
+				ended_with_newline=false
+			fi
+		done
+
+		if [[ $ended_with_newline == "false" ]]; then
+
+			user_key_in_array+=("$line_buffer") # Store the full line
+		else
+			user_key_in_array+=("") # Store the full line
+		fi
+		for ((i = 0; i < ${#user_key_in_array[@]}; i++)); do
+			d "user_key_in_array" "${user_key_in_array[$i]}"
+		done
+		d "ctx collection" >&2
+		for ((i = 0; i < ${#ctx_parser_ml_identifier_collection[@]}; i++)); do
+
+			local line="${ctx_parser_ml_identifier_collection[$i]}"
+			d "line" "$line"
+		done
+
+		local mismatch_found=false
+		# Ensure arrays have the same length
+		if [[ ${#ctx_parser_temp_collection[@]} -ne ${#user_key_in_array[@]} ]]; then
+			echo "❌ Array lengths do not match! (${#ctx_parser_temp_collection[@]} vs ${#user_key_in_array[@]})" >&2
+			echo "NO_MATCH" >&2
+			mismatch_found=true
+		fi
+		# Compare each element
+		if [[ "$mismatch_found" == "false" ]]; then
+			for ((i = 0; i < ${#ctx_parser_ml_identifier_collection[@]}; i++)); do
+				ctx_value="${ctx_parser_ml_identifier_collection[$i]}"
+				user_value="${user_key_in_array[$i]}"
+
+				echo "🔹 Index: $i" >&2
+				echo "  ctx_parser_ml_identifier_collection: '$ctx_value'" >&2
+				echo "  user_key_in_array:          '$user_value'" >&2
+
+				# Show hex dump of both values to catch hidden characters
+				echo "  ctx_parser_ml_identifier_collection (hex):" >&2
+				printf '%s' "$ctx_value" | od -tx1c >&2
+				echo "  user_key_in_array (hex):" >&2
+				printf '%s' "$user_value" | od -tx1c >&2
+				if [[ "$ctx_parser_has_explicit_literal_terminator_for_identifier" == "true" ]]; then
+					d "_)Explicit comparing(_"
+					local current_literal="$ctx_value"
+					local user_literal="$user_value"
+					#print with >...<
+					d "current_literal" ">$current_literal"
+					d "user_literal" ">$user_literal"
+				else
+					process_literal "$ctx_value"
+					local current_literal="$pl_result"
+					process_literal "$user_value"
+					local user_literal="$pl_result"
+				fi
+				# Compare the values
+				#if [[ "$ctx_value" != "$user_value" ]]; then
+				if [[ "$current_literal" != "$user_literal" ]]; then
+					echo "  ❌ MISMATCH at index $i!" >&2
+					mismatch_found=true
+				fi
+			done
+		fi
+		d : "mismatch_found" "the val $mismatch_found"
+		# Final result
+
+		# Reset, it should be reset before used, but anyway
+		ctx_parser_ml_identifier_collection=()
+
+		if [[ "$mismatch_found" == "false" ]]; then
+			echo "✅ MATCH_FOUND" >&2
+
+			ctx_parser_temp_collection=()
+
+			ctx_parser_key_was_found=true
+			# Single-line
+			if [[ "$ctx_current_token_order" == "cl" ]]; then
+				output_collection_collect_line_for_output "$ctx_current_literal" false
+				ctx_parser_state="$STATE_DETERMINE_CONTEXT"
+				return 0
+			# Multi-line
+			elif [[ "$ctx_current_token_order" == "cc" ]]; then
+				d "STACK" "ADD" "$DEFAULT_LT"
+				ctx_parser_nesting_stack_lt+=("$DEFAULT_LT")
+				ctx_parser_state="$STATE_COLLECT_LINES_INSIDE_LITERAL"
+			elif [[ "$ctx_current_token_order" == "clc" ]]; then
+
+				d "STACK" "ADD xx" "$ctx_current_literal"
+				ctx_parser_nesting_stack_lt+=("$ctx_current_literal")
+				ctx_parser_state="$STATE_COLLECT_LINES_INSIDE_LITERAL"
+			fi
+
+			return 0
+		else
+			echo "❌ NO_MATCH" >&2
+			echo "======================= SKIP =======================" >&2
+
+			ctx_parser_temp_collection=()
+
+			# We need to see if we have single or multi-line literal
+			if [[ "$ctx_current_token_order" == "cl" ]]; then
+				ctx_parser_state="$STATE_DETERMINE_CONTEXT"
+				return 0
+			elif [[ "$ctx_current_token_order" == "clc" ]]; then
+
+				ctx_parser_nesting_stack_lt+=("$ctx_current_literal")
+				ctx_parser_state="$STATE_SKIP_LINES_INSIDE_IDENTIFIER_OR_LITERAL"
+				return 0
+			fi
+
+			# Key mismatch, we dont keed to keep track of what to skip,
+			# it will skip the following multi-line literal by default by virtue of the syntax
+			# it may look like: `::
+			# At this point, we are at start of literal
+			return 0
+		fi
+		# Procede with the literal that belongs to the key
+		;;
+	"$STATE_COLLECT_LINES_INSIDE_LITERAL")
+		# Joining Collect identifier and literal into one condition shares same code, but introduces
+		# difficult conditional exceptions to be handled and cared for elswehere in the code.
+		# So rather duplicate the code.
+
+		d "COLLECT" "line" "$line"
+		parse_single_line "$ctx_current_line"
+		d "COLLECT" "ret_token_order" "$ret_token_order" "ret_primary_token1" "$ret_primary_token1" "ret_primary_token2" "$ret_primary_token2"
+		# Keep track of nesting level
+		case "$ret_token_order" in
+		"icc")
+			ctx_parser_nesting_stack_lt+=("$DEFAULT_LT")
+			d "STACK" "---ADD" "$DEFAULT_LT"
+			ctx_parser_temp_collection+=("$ctx_current_line")
+			return 0
+			;;
+		"ec")
+			ctx_parser_nesting_stack_lt+=("$DEFAULT_LT")
+			d "STACK" "ADD" "$DEFAULT_LT"
+			ctx_parser_temp_collection+=("$ctx_current_line")
+			return 0
+			;;
+		"ecc")
+			ctx_parser_nesting_stack_lt+=("$DEFAULT_LT")
+			d "STACK" "ADD a" "$DEFAULT_LT"
+			d "____cur line____" "$ctx_current_line"
+			ctx_parser_temp_collection+=("$ctx_current_line")
+			return 0
+			;;
+		"eclc")
+			ctx_parser_nesting_stack_lt+=("$ret_primary_token1")
+			d "STACK" "ADD a" "$DEFAULT_LT"
+			d "____cur line____" "$ctx_current_line"
+			ctx_parser_temp_collection+=("$ctx_current_line")
+			return 0
+			;;
+		"iclc")
+			ctx_parser_nesting_stack_lt+=("$ret_primary_token2")
+			d "STACK" "ADD" "$primary_token2"
+			ctx_parser_temp_collection+=("$ctx_current_line")
+			return 0
+			;;
+
+		"clc")
+			ctx_parser_nesting_stack_lt+=("$ret_primary_token1")
+			d "STACK" "ADD" "$ret_primary_token1"
+			ctx_parser_temp_collection+=("$ctx_current_line")
+			return 0
+			;;
+		esac
+
+		# Get top of stack
+		local lt_on_top_of_stack="${ctx_parser_nesting_stack_lt[-1]}"
+		local is_explicit_literal_terminator=false
+		has_value_terminator "$ctx_current_line" "$lt_on_top_of_stack"
+		if [[ $? -eq 0 ]]; then
+
+			# Array slicing to remove last element, Chat says `unset array[-1]` is not supported (?)
+			ctx_parser_nesting_stack_lt=("${ctx_parser_nesting_stack_lt[@]:0:${#ctx_parser_nesting_stack_lt[@]}-1}")
+			d "STACK" "POP" "$lt_on_top_of_stack"
+
+			# If stack empty
+			if [[ ${#ctx_parser_nesting_stack_lt[@]} -eq 0 ]]; then
+
+				# In case of uninterpreted data before the terminator
+				if [[ "$hvt_ret_has_preceding_data" == "true" ]]; then
+					# Add the preceding data to the collection
+					ctx_parser_temp_collection+=("$hvt_ret_preceding_data")
+					is_explicit_literal_terminator=true
+					ctx_parser_last_line_was_explicit_literal_terminator=true
+				fi
+
+				# We are back at bottom level and reached the end of the multi line span.
+				d " End of multi-line span" "line" "$line"
+
+				#print temp collection
+				for ((i = 0; i < ${#ctx_parser_temp_collection[@]}; i++)); do
+					d "____cur line_____" ">${ctx_parser_temp_collection[$i]}<"
+				done
+				if [[ "$is_explicit_literal_terminator" == "true" ]]; then
+					d "flag is_explicit_literal_terminator" "true"
+					output_collection_add_lines_from_temp_with_regard_to_trimming false
+				else
+					d "flag is_explicit_literal_terminator" "false"
+					output_collection_add_lines_from_temp_with_regard_to_trimming true
+				fi
+				#ctx_collecting_multi_line_literal=false
+				#ctx_has_multi_line_literal_collection=true
+				#ctx_parser_ml_literal_collection=("${ctx_parser_temp_collection[@]}")
+				d "the temp collection"
+				for ((i = 0; i < ${#ctx_parser_temp_collection[@]}; i++)); do
+					d "____cur line_____" "${ctx_parser_temp_collection[$i]}"
+				done
+				d "the output collection"
+				for ((i = 0; i < ${#ctx_output_collection[@]}; i++)); do
+					d "____out line_____" "${ctx_output_collection[$i]}"
+				done
+				ctx_parser_state="$STATE_DETERMINE_CONTEXT"
+
+				return 0
+			fi
+		fi
+		# Collect the line in temp collection
+		d "Adding line " "line" "$line"
+		# if stack is 0
+		d "Adding line --- " "line" ">$line<"
+		ctx_parser_temp_collection+=("$ctx_current_line")
+		return 0
+		;;
+	"$STATE_COLLECT_LINES_INSIDE_IDENTIFIER")
+		d "COLLECT" "line" "$line"
+		parse_single_line "$ctx_current_line"
+		d "COLLECT" "ret_token_order" "$ret_token_order" "ret_primary_token1" "$ret_primary_token1" "ret_primary_token2" "$ret_primary_token2"
+		# Keep track of nesting level
+		case "$ret_token_order" in
+		#
+		#		"icc")
+		#			ctx_parser_nesting_stack_lt+=("$DEFAULT_LT")
+		#			d "STACK" "ADD-x" "$DEFAULT_LT"
+		#			return 0
+		#			;;
+		#		"ec")
+		#			ctx_parser_nesting_stack_lt+=("$DEFAULT_LT")
+		#			d "STACK" "ADD" "$DEFAULT_LT"
+		#			return 0
+		#			;;
+		#		"ecc")
+		#			ctx_parser_nesting_stack_lt+=("$DEFAULT_LT")
+		#			d "STACK" "ADD" "$DEFAULT_LT"
+		#			return 0
+		#			;;
+		#		"iclc")
+		#			ctx_parser_nesting_stack_lt+=("$ret_primary_token2")
+		#			d "STACK" "ADD" "$primary_token2"
+		#			return 0
+		#			;;
+		#
+		#		"clc")
+		#			ctx_parser_nesting_stack_lt+=("$ret_primary_token1")
+		#			d "STACK" "ADD" "$ret_primary_token1"
+		#			return 0
+		#			;;
+		esac
+
+		# Get top of stack
+		local lt_on_top_of_stack="${ctx_parser_nesting_stack_lt[-1]}"
+		has_value_terminator "$ctx_current_line" "$lt_on_top_of_stack"
+		if [[ $? -eq 0 ]]; then
+			# Array slicing to remove last element, Chat says unset array[-1] is not supported (?)
+			ctx_parser_nesting_stack_lt=("${ctx_parser_nesting_stack_lt[@]:0:${#ctx_parser_nesting_stack_lt[@]}-1}")
+			d "STACK" "POP" "$lt_on_top_of_stack"
+			# If stack empty
+			if [[ ${#ctx_parser_nesting_stack_lt[@]} -eq 0 ]]; then
+				# In case of uninterpreted data before the terminator
+				if [[ "$hvt_ret_has_preceding_data" == "true" ]]; then
+					# Add the preceding data to the collection
+					ctx_parser_temp_collection+=("$hvt_ret_preceding_data")
+					is_explicit_literal_terminator=true
+					ctx_parser_has_explicit_literal_terminator_for_identifier=true
+				fi
+
+				# We are back at bottom level and reached the end of the multi line span.
+				d " End of multi-line span" "line" "$line"
+
+				# If processed multi-line literal or identifier, process it
+				d "--->>>>>>>> line $line"
+				ctx_parser_ml_identifier_collection=("${ctx_parser_temp_collection[@]}")
+				ctx_parser_state="$STATE_EVALUATE_MULTI_LINE_IDENTIFIER"
+				return 0
+			fi
+		fi
+		# Collect the line in temp collection
+		d "Adding line " "line" "$line"
+		ctx_parser_temp_collection+=("$ctx_current_line")
+		return 0
+		;;
+	"$STATE_SKIP_LINES_INSIDE_IDENTIFIER_OR_LITERAL")
+		d "SKIP" "line" "$ctx_current_line"
+		parse_single_line "$ctx_current_line"
+		d "SKIP" "ret_token_order" "$ret_token_order" "ret_primary_token1" "$ret_primary_token1" "ret_primary_token2" "$ret_primary_token2"
+		# Keep track of nesting level
+		case "$ret_token_order" in
+		"icc")
+			ctx_parser_nesting_stack_lt+=("$DEFAULT_LT")
+			d "STACK" "ADD" "$DEFAULT_LT"
+			return 0
+			;;
+
+		"ec")
+			ctx_parser_nesting_stack_lt+=("$DEFAULT_LT")
+			# print stack
+			d "STACK" "ADD" "$DEFAULT_LT"
+			return 0
+			;;
+		"ecc")
+			ctx_parser_nesting_stack_lt+=("$DEFAULT_LT")
+			d "STACK" "ADD" "$DEFAULT_LT"
+			return 0
+			;;
+		"eclc")
+			ctx_parser_nesting_stack_lt+=("$ret_primary_token1")
+			d "STACK" "ADD" "$DEFAULT_LT"
+			return 0
+			;;
+		"iclc")
+			ctx_parser_nesting_stack_lt+=("$ret_primary_token2")
+			d "STACK" "ADD" "$ret_primary_token2"
+			return 0
+			;;
+
+		"clc")
+			ctx_parser_nesting_stack_lt+=("$ret_primary_token1")
+			d "STACK" "ADD" "$ret_primary_token1"
+			return 0
+			;;
+		esac
+
+		# Get top of stack
+		if [[ ${#ctx_parser_nesting_stack_lt[@]} -gt 0 ]]; then
+			local lt_on_top_of_stack="${ctx_parser_nesting_stack_lt[-1]}"
+			has_value_terminator "$ctx_current_line" "$lt_on_top_of_stack"
+			if [[ $? -eq 0 ]]; then
+				# Array slicing to remove last element, Chat says unset array[-1] is not supported (?)
+				ctx_parser_nesting_stack_lt=("${ctx_parser_nesting_stack_lt[@]:0:${#ctx_parser_nesting_stack_lt[@]}-1}")
+				d "STACK" "POP" "$lt_on_top_of_stack"
+				# If stack empty
+				if [[ ${#ctx_parser_nesting_stack_lt[@]} -eq 0 ]]; then
+					# We are back at bottom level and reached the end of the multi line span.
+					d " End of multi-line span" "line" "$line"
+					ctx_parser_state="$STATE_DETERMINE_CONTEXT"
+				fi
+			fi
+		fi
+		return 0
+		;;
+
+	*)
+		echo "Error: Invalid parser state: '$ctx_parser_state'" >&2
+		;;
+	esac
+
+	return 0
+}
+
+#-------------------------------------------------------------------------#
+#                               Key functions                             #
+#-------------------------------------------------------------------------#
+ctx_user_given_key_is_empty() {
+	if [[ "$ctx_parser_target_key" == "" ]]; then
+		return 0
+	fi
+	return 1
+}
+
+#-------------------------------------------------------------------------#
+#                            Declare collections                          #
+#-------------------------------------------------------------------------#
+# Associative array to store collections
+#declare -A declare_collections
+#dcg_ret_declare_collection=() # Global array for returning retrieved values
+#
+## Function to store an array
+#declare_collection_set() {
+#	local id="$1"
+#
+#	if [[ -z "$id" ]]; then
+#		echo "Error: Missing ID. Usage: declare_collection_set <id> <array_values>" >&2
+#		return 1
+#	fi
+#	local -n array_ref="$2"
+#	# Create a temporary variable name for storing the array
+#
+#	#print whats set loop it
+#	d "SETTING DECLARE COLLECTION" "id" "$id"
+#	for ((i = 0; i < ${#array_ref[@]}; i++)); do
+#		d "input array_ref" "${array_ref[$i]}"
+#	done
+#
+#	# Copy the actual values from the referenced array into a new variable
+#
+#	# Store the actual array values instead of a reference
+#	declare -a temp_array=("${array_ref[@]}")
+#	declare_collections["$id"]="$(declare -p temp_array)"
+#}
+#
+## Function to retrieve an array by ID
+#declare_collection_get() {
+#	local id="$1"
+#
+#	if [[ -z "$id" ]]; then
+#		echo "Error: Missing ID. Usage: declare_collection_get <id>" >&2
+#		return 1
+#	fi
+#
+#	local stored_array="${declare_collections[$id]}"
+#
+#	if [[ -z "$stored_array" ]]; then
+#		echo "Error: No collection found for ID '$id'" >&2
+#		return 1
+#	fi
+#
+#	# Evaluate the stored declare statement to restore the array
+#	eval "$stored_array"
+#
+#	# Reference the restored array
+#	local -n restored_array="temp_array"
+#
+#	d "RETRIEVING DECLARE COLLECTION" "id" "$id"
+#	for ((i = 0; i < ${#restored_array[@]}; i++)); do
+#		d "output array_ref" "${restored_array[$i]}"
+#	done
+#
+#	# Copy to the global return variable
+#	dcg_ret_declare_collection=("${restored_array[@]}")
+#}
+
+# Associative array to store collections
+declare -A declare_collections
+dcg_ret_declare_collection=()           # Global array for returning retrieved values
+declare -g declare_collection_counter=0 # Global counter for unique variable names
+
+# Function to store an array
+declare_collection_set() {
+	local id="$1"
+
+	if [[ -z "$id" ]]; then
+		echo "Error: Missing ID. Usage: declare_collection_set <id> <array_variable>" >&2
+		return 1
+	fi
+
+	local -n array_ref="$2"
+
+	# Debugging output
+	d "SETTING DECLARE COLLECTION" "id" "$id"
+	for ((i = 0; i < ${#array_ref[@]}; i++)); do
+		d "input array_ref" "${array_ref[$i]}"
+	done
+
+	# Store a snapshot of the array using a temporary variable
+	declare -a temp_array=("${array_ref[@]}")
+	declare_collections["$id"]="$(declare -p temp_array)"
+}
+
+# Function to retrieve an array by ID (Safely using a unique global counter)
+declare_collection_get() {
+	local id="$1"
+
+	if [[ -z "$id" ]]; then
+		echo "Error: Missing ID. Usage: declare_collection_get <id>" >&2
+		return 1
+	fi
+
+	local stored_array="${declare_collections[$id]}"
+
+	if [[ -z "$stored_array" ]]; then
+		echo "Error: No collection found for ID '$id'" >&2
+		return 1
+	fi
+
+	# Generate a unique variable name using a global counter
+	local unique_var="retrieved_array_$((declare_collection_counter++))"
+
+	# Evaluate the stored declare statement into the unique variable
+	eval "${stored_array/temp_array/$unique_var}"
+
+	# Reference the restored array safely
+	local -n restored_array="$unique_var"
+
+	d "RETRIEVING DECLARE COLLECTION" "id" "$id"
+	for ((i = 0; i < ${#restored_array[@]}; i++)); do
+		d "output array_ref" "${restored_array[$i]}"
+	done
+
+	# Copy to the global return variable
+	dcg_ret_declare_collection=("${restored_array[@]}")
+}
+declare_collection_print_all() {
+	d "Printing all stored collections"
+
+	# Loop through all stored keys
+	for key in "${!declare_collections[@]}"; do
+		d "key x:" "$key"
+
+		# Retrieve the stored array
+		declare_collection_get "$key"
+
+		# Print the contents
+		for value in "${dcg_ret_declare_collection[@]}"; do
+			d "data" "$value"
+		done
+	done
+}
+
+#-------------------------------------------------------------------------#
+#                             Main parser loop                            #
+#-------------------------------------------------------------------------#
+
+readonly STATE_FUNCTIONAL_TOKEN_INACTIVE=0
+readonly STATE_FUNCTIONAL_TOKEN_COLLECT_FOR_DECLARE=1
+declare -g ctx_parser_functional_token_processing_state=$STATE_FUNCTIONAL_TOKEN_INACTIVE
+
+# The the parser parsing the top-most level level of the input data (which can have several levels nested).
+linekey_parser_wrapped() {
+
+	declare -g ctx_parser_target_key="$1"
+	declare -g ctx_parser_state="determine_context"
+	declare -g ctx_parser_nesting_stack_lt=()
+	declare -g ctx_parser_temp_collection=()
+	declare -g ctx_functional_token_current_declare_id=""
+	declare -g pre_collected_lines=()
+	#declare -g ctx_parser_key_was_found=false
+	#declare -g ctx_parser_debug_mode=false
+
+	# Parse user given key first
+
+	# Providing an empty key at any level outputs debug information
+	if [[ "$ctx_parser_target_key" == "" ]]; then
+		echo "  Debug   Empty or no key sets debug mode showing how script is interpreted." >&2
+		echo -e "\e[0;90m---------\e[0m" >&2
+		ctx_parser_debug_mode=true
+	fi
+
+	reset_ctx_user
+	reset_ctx_output
+	reset_ctx_parser
+	#	ctx_line_type
+	local captured_output_collection=()
+	local captured_output_collection_trim_state=()
+	local comment_line
+	while IFS= read -r line; do
+
+		local comment_line=${line#"${line%%[![:space:]]*}"}
+		if [[ ${comment_line:0:2} == "--" || ${comment_line:0:1} == "#" ]]; then
+			continue
+		fi
+		# Cut out line comments already here.
+		#
+
+		# NOTE:
+		# We need to have an internal loop to handle directives, as they can nest, a deeper directive needs to be parsed as directive, thus this loop around the directive parsing
+		# BUG: In a config, do file:./x, where x in turn declares a template, and then includes it... Will not work, because file directive just
+		# sends all data to the parser and does not allow for evaluating of any contained directives.
+		# Parser is in two parts: 1) handle operators, 2) handle regular lines
+
+		# Even when collecting lines for a `declare`, we watch out for `include` inside it.
+		has_functional_token "$line"
+		if [[ $? -eq 0 ]]; then
+			# Functional token found
+			functional_token="$hft_ret_functional_token"
+
+			# Cut out the whole operator part from the line, and we can procede as usual
+			((hft_ret_ft_pos++))
+			line="${line:${hft_ret_ft_pos}}"
+			functional_data="$line"
+
+			d "functional_token" "$functional_token"
+			d "line" "$line"
+			case "$functional_token" in
+
+			# Since a `declare` always mapps out any includes when collecting, it will practically allow chaining of includes
+			# declare::x::
+			# data1
+			# :
+			# declare::y::
+			# include::x
+			# :
+			# declare::z::
+			# include::y
+			# :
+			#
+			# The above produces the declared data:
+			# data1
+			#
+			# Even this is possible:
+			# declare::z2::
+			# include::y
+			# include::x
+			# :
+			#
+			# The above example produces the declared data:
+			# data1
+			# data1
+			#
+			"parser")
+
+				case "$functional_data" in
+				"sleep")
+					ctx_parser_sleeping=true
+					;;
+				"awake")
+					ctx_parser_sleeping=false
+					;;
+				esac
+				continue
+				;;
+
+			"include")
+				d "GOING INTO INCLUDE" "functional_data" "$functional_data"
+
+				d "__--__----------------------------__--__"
+				# We are encountering an include line during normal parsing (not in a declare functional token)
+				local include_id="$functional_data"
+				declare_collection_get "$include_id"
+				# Loop trouhg dcg_ret_declare_collection and parse each line
+				for include_line in "${dcg_ret_declare_collection[@]}"; do
+					# pass this to the parser, it will treat it as naturally ocurring line.
+					d "Inserting by INCLUDE case 2" "include_line" "$include_line"
+					parser_parse_line "$include_line"
+				done
+
+				# Now go past the include line and continue
+				continue
+
+				;;
+			"declare")
+
+				# Parse the declare_data, which is in syntax of ordinary line, to get eventual literal terminator
+				parse_single_line "$functional_data"
+				d "PARSE" "ret_token_order" "$ret_token_order" "ret_primary_token1" "$ret_primary_token1" "ret_primary_token2" "$ret_primary_token2"
+				d "RETX" " $ret_token_order"
+				case "$ret_token_order" in
+
+				"icc")
+					ctx_parser_nesting_stack_lt+=("$DEFAULT_LT")
+					ctx_parser_functional_token_declare_id="$ret_primary_token1"
+					;;
+
+				"iclc")
+					ctx_parser_functional_token_declare_id="$ret_primary_token1"
+					ctx_parser_nesting_stack_lt+=("$ret_primary_token2")
+					;;
+				"icl")
+					# Single line literal
+					parse_single_line "$functional_data"
+
+					output_collection_collect_line_for_output "$ret_primary_token2" false
+					#
+					# Do not go down or its treated as multi-line literal
+					continue
+					;;
+				*)
+					echo "Error: Invalid declare syntax. Must be icc or iclc." >&2
+					return 1
+					;;
+				esac
+
+				ctx_parser_functional_token_processing_state=$STATE_FUNCTIONAL_TOKEN_COLLECT_FOR_DECLARE
+				ctx_parser_state="$STATE_COLLECT_LINES_INSIDE_LITERAL"
+				output_collection_set "captured_output_collection" "captured_output_collection_trim_state"
+				d "starting for" "ctx_parser_functional_token_declare_id" "$ctx_parser_functional_token_declare_id"
+				continue
+				;;
+
+			"file")
+
+				d "GOING INTO FILE" "functional_data" "$functional_data"
+				# We are not in a functional token span, so we can process the include
+				# Get the ID of the collection to include
+				local include_id="$functional_data"
+				# Get the collection
+
+				# Check if the file exists
+				if [[ ! -f "$functional_data" ]]; then
+					echo "Error: File '$functional_data' does not exist." >&2
+					exit 1
+				fi
+
+				# Read lines from the file and process them
+				while IFS= read -r include_line; do
+					d "Inserting by FILE" "include_line" "$include_line"
+					# Pass this to the parser, it will treat it as part of the declare.
+					parser_parse_line "$include_line"
+				done <"$functional_data"
+				#ctx_parser_functional_token_processing_state=$STATE_FUNCTIONAL_TOKEN_INACTIVE
+				# Now go past the include line and continue
+				continue
+
+				;;
+			"base64-decode")
+				# NOTE:
+				# Not implemented
+				#
+				# The code starts to reach its limits for accepable complexity.
+				# The limited features of Bash makes it a bit hard to implement base64 decoding of output without cluttering the code with flags and if-else cases.
+				#
+				# As is now, we have:
+				#  a state machine for parsing a single line to determine the type of line,
+				#  a state machine for parsing multiple lines, in sequence, of different types (like collecting a multi-line literal)
+				#  a small state machine for parsing functional tokens (include/declare)
+				#
+				# What complicates it is, the decoding must happen just before the output of it,
+				# as bash can not handle binary.
+				#
+				# To solve this cleanly, we would perhaps need another state machine for processing the output and make a cleaner interface for collecting output in such a way that it also can mark what output is to be decoded and how (single line base64 or multi-line base64)
+				#
+				# The quick not so clean solution to implement it:
+				# Go to STATE_COLLECT_LINES_INSIDE_LITERAL
+				# and at output_collection_add_lines_from_temp_with_regard_to_trimming
+				# take note of index in output collection it is inserted, and where the insert ends.
+				# Then at output stage, looping trough output collection, if we are within the range of the base64-decode, then process it as such.
+				# When noting the index at output_collection_add_lines_from_temp_with_regard_to_trimming, we should also note the index of the base64-decode,
+				# also keep track if it is explicit or not. Explicit is to be sent whole to base64 decoder, not decoded line by line.
+				#
+				# Single line literal, multi-line literal, multi-line explicit literal, all need to handle base64 for full implementation.
+				#
+				# This would perhaps be worht implementing for a parser written in another language with which has better features for structuring code. A parser written in another language would be worth writing for sake of processing speed.
+				;;
+			esac
+
+		fi
+
+		if [[ "$ctx_parser_sleeping" == "true" ]]; then
+			continue
+		fi
+
+		# Parse ordinary lines
+		# If we had functional token, we have extracted that and now
+		# have the rest of the line as an ordinary line
+		parser_parse_line "$line"
+
+		# Functional token processing
+		if [[ $ctx_parser_functional_token_processing_state -eq $STATE_FUNCTIONAL_TOKEN_COLLECT_FOR_DECLARE ]]; then
+			# Did the parser state for parsing ordinary lines change
+			if [[ "$ctx_parser_state" == $STATE_DETERMINE_CONTEXT ]]; then
+				# We have reached the end of the functional token `include` span
+				ctx_parser_functional_token_processing_state=$STATE_FUNCTIONAL_TOKEN_INACTIVE
+
+				output_collection_unset
+				d "print captured_output_collection"
+				# print captured_output_collection
+				# TODO: set in declare_collection_set
+				d "FINISHED AAND TO SET ctx_parser_functional_token_declare_id" "$ctx_parser_functional_token_declare_id"
+				declare_collection_set "$ctx_parser_functional_token_declare_id" "captured_output_collection"
+				# test get and loop print it
+				d "DONE COLLECTING FOR DECLARE" "ctx_parser_functional_token_declare_id" "$ctx_parser_functional_token_declare_id"
+				d " PRINTING IT"
+				declare_collection_get "$ctx_parser_functional_token_declare_id"
+				for test_line in "${dcg_ret_declare_collection[@]}"; do
+					d "test_line" "$test_line"
+				done
+				ctx_parser_temp_collection=()
+				local captured_output_collection=()
+
+			fi
+
+		fi
+	done
+	if [[ $ctx_parser_key_was_found == "false" && $ctx_parser_target_key != "" ]]; then
+		echo "Error: Key '$ctx_parser_target_key' not found." >&2
+		return 1
+
+	fi
+
+	# Print all collected lines
+	# if only one element then
+	if [[ ${#ctx_output_collection[@]} -eq 1 ]]; then
+		if [[ "$ctx_output_found_single_line_value" == "true" ]]; then
+			echo -n "${ctx_output_collection[0]}"
+			# Our system cuts one after command subsitution to preserve newlines
+			# in other cases, so we add a char to prevent that, command substitutions strip newlines (or excessive ones)
+			# NOTE:
+			# No this shouldnt be here, is handled elsewhere
+			# We could assume we should, because below at return 0, we do, but here we only return a single value,
+			# Not sure how this works.
+			# command substitution probably adds a newline,
+			printf "x"
+
+			return 0
+		fi
+	fi
+
+	# It may have return(0)ed above, but if we are here we continue
+	# We may still have only 1 element, but it wasnt a single line value, so continue
+
+	for ((i = 0; i < ${#ctx_output_collection[@]}; i++)); do
+		# Potentially trim leading/trailing whitespace
+		if [[ "${ctx_output_should_line_be_trimmed[$i]}" == "true" ]]; then
+			line=${ctx_output_collection[$i]}
+			line=${line#"${line%%[![:space:]]*}"} # Trim leading whitespace
+			line=${line%"${line##*[![:space:]]}"} # Trim trailing whitespace
+
+		else
+
+			line=${ctx_output_collection[$i]}
+		fi
+
+		# Check if we're at the last line and if no newline is desired
+		# TODO: Ensure ctx_output_no_newline_at_end is used
+		# previously ctx_output_no_newline_at_end
+		if ((i == ${#ctx_output_collection[@]} - 1)) && [[ "${ctx_parser_last_line_was_explicit_literal_terminator}" == "true" ]]; then
+			# Print without adding a newline at the end
+			printf "%s" "$line"
+		else
+			# Normal print with a newline
+			echo "$line"
+		fi
+	done
+	d "DONE DONE DONE"
+	#if [[ $ctx_parser_target_key == "" ]]; then
+	#	# We always return 1 if we used empty key.
+	#	# Using empty key triggers debug mode,
+	#	# but user may have entered "" by mistake and should thus have error code.
+	#	return 1
+	#fi
+	# NOTE:
+	# We always have a last char added to prevent shellsubstitution from stripping newlines we want to preserve
+	printf "x"
+	declare_collection_print_all
+
+	return 0
+}
+
+#-------------------------------------------------------------------------#
+#                         Command line interaction                        #
+#-------------------------------------------------------------------------#
+
+d "linekey_parser" "$@"
+d "Number of keys: $#"
+if [[ $# -eq 0 ]]; then
+	d "No keys given" >&2
+	exit 0
+fi
+
+# Check if data is piped
+if [ ! -t 0 ]; then
+
+	# If no arg is supplied, default to print a colorized parsing of the input data
+	cat | linekey_parser "${@:-""}"
+elif [ $# -ge 1 ]; then
+	if [[ $# -eq 1 && -f "$1" ]]; then
+
+		# If no arg is supplied, default to print a colorized parsing of the input data
+		cat "$1" | linekey_parser ""
+	else
+
+		file="$1"
+		shift # Remove the filename from args list
+		if [ ! -f "$file" ]; then
+			echo "Error: File '$file' not found."
+			exit 1
+		fi
+		cat "$file" | linekey_parser "$@"
+	fi
+else
+	echo "Usage: $0 <file> [key1 key2 ...] OR pipe data to the script"
+	exit 1
+fi

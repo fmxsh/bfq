@@ -1,0 +1,402 @@
+#!/bin/bash
+
+# ###################################################### #
+# Test the imaplementation of the LineKey Config parser. #
+# ###################################################### #
+
+#-------------------------------------------------------------------------#
+#                                  Helpers                                #
+#-------------------------------------------------------------------------#
+
+generate_combinations_singleline_syntax() {
+	local key=$1
+	local value=$2
+	local combinations=()
+	local trailing=$3
+
+	# Whitespace options: no space, single space
+	#ws=(" " "" $'\t')
+	local ws=(" " "")
+
+	# Generate all combinations of whitespace before and after the key and value
+	for key_ws_before in "${ws[@]}"; do
+		for key_ws_after in "${ws[@]}"; do
+			for value_ws_before in "${ws[@]}"; do
+
+				# Construct the formatted key-value pair
+				combinations+=("${key_ws_before}${key}${key_ws_after}\"${value}\"${value_ws_before}")
+			done
+		done
+	done
+
+	for key_ws_before in "${ws[@]}"; do
+		for key_ws_after in "${ws[@]}"; do
+			for value_ws_before in "${ws[@]}"; do
+				if [[ ! -z "$trailing" ]]; then
+					for trailing_ws_after in "${ws[@]}"; do
+						# Construct the formatted key-value pair
+						combinations+=("${key_ws_before}${key}${key_ws_after}\"${value}\"${value_ws_before}${trailing}${trailing_ws_after}")
+					done
+				fi
+			done
+		done
+	done
+	# Return all combinations
+	printf "%s\n" "${combinations[@]}"
+}
+
+# Can generate both correct and incorrect multiline syntax. Incorrect is if trailing is not empty, meaning, chars after the number at end of line
+generate_combinations_multiline_syntax() {
+	local key=$1
+	local value=$2
+	local combinations=()
+	local trailing=$3
+
+	# Whitespace options: no space, single space
+	#ws=(" " "" $'\t')
+	local ws=(" " "")
+
+	# Generate all combinations of whitespace before and after the key and value
+	for key_ws_before in "${ws[@]}"; do
+		for key_ws_after in "${ws[@]}"; do
+			for colon_ws_before in "${ws[@]}"; do
+				for value_ws_before in "${ws[@]}"; do
+					for number_ws_after in "${ws[@]}"; do
+						# Construct the formatted key-value pair
+						combinations+=("${key_ws_before}${key}${key_ws_after}\"${value}\"${value_ws_before}:${colon_ws_before}2${number_ws_after}")
+					done
+				done
+			done
+		done
+	done
+
+	for key_ws_before in "${ws[@]}"; do
+		for key_ws_after in "${ws[@]}"; do
+			for value_ws_before in "${ws[@]}"; do
+				for colon_ws_before in "${ws[@]}"; do
+					for number_ws_after in "${ws[@]}"; do
+						if [[ ! -z "$trailing" ]]; then
+							for trailing_ws_after in "${ws[@]}"; do
+								# Construct the formatted key-value pair
+								combinations+=("${key_ws_before}${key}${key_ws_after}\"${value}\"${value_ws_before}:${colon_ws_before}2${number_ws_after}${trailing}${trailing_ws_after}")
+							done
+						fi
+					done
+				done
+			done
+		done
+	done
+	# Return all combinations
+	printf "%s\n" "${combinations[@]}"
+}
+generate_combinations_multiline_with_value_terminator() {
+	local key=$1
+	local value=$2
+	local combinations=()
+	local trailing=$3
+
+	# Whitespace options: no space, single space
+	#ws=(" " "" $'\t')
+	local ws=(" " "")
+
+	# Generate all combinations of whitespace before and after the key and value
+	for key_ws_before in "${ws[@]}"; do
+		for key_ws_after in "${ws[@]}"; do
+			for colon2_ws_after in "${ws[@]}"; do
+				for value_ws_before in "${ws[@]}"; do
+					# Construct the formatted key-value pair
+					combinations+=("${key_ws_before}${key}${key_ws_after}\"${value}\"${value_ws_before}:${colon2_ws_after}")
+				done
+			done
+		done
+	done
+
+	for key_ws_before in "${ws[@]}"; do
+		for key_ws_after in "${ws[@]}"; do
+			for value_ws_before in "${ws[@]}"; do
+				for colon2_ws_after in "${ws[@]}"; do
+					if [[ ! -z "$trailing" ]]; then
+						for trailing_ws_after in "${ws[@]}"; do
+							# Construct the formatted key-value pair
+							combinations+=("${key_ws_before}${key}${key_ws_after}\"${value}\"${value_ws_before}:${colon2_ws_after}${trailing}${trailing_ws_after}")
+						done
+					fi
+				done
+			done
+		done
+	done
+	# Return all combinations
+	printf "%s\n" "${combinations[@]}"
+}
+generate_combinations_multiline_with_selector_syntax() {
+	local key=$1
+	local value=$2
+	local combinations=()
+	local trailing=$3
+	local span=$4
+	local selector=$5
+
+	# Whitespace options: no space, single space
+	#ws=(" " "" $'\t')
+	ws=(" " "")
+
+	# Generate all combinations of whitespace before and after the key and value
+	for key_ws_before in "${ws[@]}"; do
+		for key_ws_after in "${ws[@]}"; do
+			for value_ws_before in "${ws[@]}"; do
+				for colon_ws_before in "${ws[@]}"; do
+					for colon2_ws_before in "${ws[@]}"; do
+						for colon2_ws_after in "${ws[@]}"; do
+							for number_ws_after in "${ws[@]}"; do
+								# Construct the formatted key-value pair
+								combinations+=("${key_ws_before}${key}${key_ws_after}\"${value}\"${value_ws_before}:${colon_ws_before}${span}${colon2_ws_before}:${colon2_ws_after}${selector}${number_ws_after}")
+							done
+						done
+					done
+				done
+			done
+		done
+	done
+
+	for key_ws_before in "${ws[@]}"; do
+		for key_ws_after in "${ws[@]}"; do
+			for value_ws_before in "${ws[@]}"; do
+				for colon_ws_before in "${ws[@]}"; do
+					for colon2_ws_before in "${ws[@]}"; do
+						for colon2_ws_after in "${ws[@]}"; do
+							for number_ws_after in "${ws[@]}"; do
+								if [[ ! -z "$trailing" ]]; then
+									for trailing_ws_after in "${ws[@]}"; do
+										# Construct the formatted key-value pair
+										combinations+=("${key_ws_before}${key}${key_ws_after}\"${value}\"${value_ws_before}:${colon_ws_before}${span}${colon2_ws_before}:${colon2_ws_after}${selector}${number_ws_after}${trailing}${trailing_ws_after}")
+									done
+								fi
+							done
+						done
+					done
+				done
+			done
+		done
+	done
+	# Return all combinations
+	printf "%s\n" "${combinations[@]}"
+}
+
+general_check_by_key_against_cases() {
+	local match_is_positive=$1
+	local key=$2
+	local line_to_check=$3
+	local data_to_check=$4
+	local function_to_call=$5
+	local show_grep_result=$6
+
+	grep_result=$(echo "$data_to_check" | "$function_to_call" "$key")
+	# Sometimes match means failure, sometimes match means success
+	# 1 / 0 to determine
+	# Check if grep found any match
+	# if return code is 0, we have a match
+	exit_status=$?
+
+	if [[ "$match_is_positive" -eq 1 ]]; then
+		if [[ "$exit_status" -eq 0 ]]; then
+			# Bright green for success
+			echo -e "\033[1;32m[OK]\033[0m Grep Match Found on this Line: $line_to_check"
+			if [[ "$show_grep_result" -eq 1 ]]; then
+				echo -e "Grep Result: \033[0;33m[\033[0;36m$grep_result\033[0;33m]\033[0m"
+			fi
+		else
+			# Bright red for failure
+			echo -e "\033[1;31m[FAIL]\033[0m No match found for key:\n $key\n in line:\n $line_to_check"
+			echo "Data to check:\n $data_to_check"
+		fi
+	else
+		if [[ "$exit_status" -eq 0 ]]; then
+			echo -e "\033[1;31m[FAIL]\033[0m Grep Match Found for key: $key in line: $line_to_check"
+		else
+			echo -e "\033[1;32m[OK]\033[0m No match found for key: $line_to_check"
+			if [[ "$show_grep_result" -eq 1 ]]; then
+				echo -e "Grep Result: \033[0;33m[\033[0;36m$grep_result\033[0;33m]\033[0m"
+			fi
+		fi
+
+	fi
+
+	# echo "GREP RESULT: $grep_result"
+	# echo "DATA TO CHECK: $data_to_check"
+	# echo "KEY: $key"
+}
+
+# Used to generate for key and value testing
+generate_all_characters_and_whitespace() {
+	local result=""
+	local counter=0
+
+	# Add printable characters (ASCII 33 to 126)
+	for ((i = 33; i <= 126; i++)); do
+		result+=$(printf "\\$(printf '%03o' "$i")")
+
+		# Add a tab every 5 characters
+		((counter++))
+		if ((counter % 5 == 0)); then
+			result+=$'\t'
+		fi
+
+		# Add a space every 7 characters
+		if ((counter % 7 == 0)); then
+			result+=" "
+		fi
+	done
+
+	# Add UTF-8 characters (e.g., basic emojis and symbols)
+	result+=$(printf "\u263A") # ☺ (Smiley Face)
+	result+=$(printf "\u2713") # ✓ (Checkmark)
+
+	# Add UTF-16 characters (e.g., mathematical symbols and scripts)
+	result+=$(printf "\U0001F600") # 😀 (Grinning Face, UTF-16 surrogate pair)
+	result+=$(printf "\U0001F680") # 🚀 (Rocket)
+
+	# Add UTF-32 characters (e.g., special symbols, exotic scripts)
+	result+=$(printf "\U0001F48E") # 💎 (Gem Stone)
+	result+=$(printf "\U0001F3C6") # 🏆 (Trophy)
+
+	echo "$result"
+}
+
+#-------------------------------------------------------------------------#
+#                                 RUN TESTS                               #
+#-------------------------------------------------------------------------#
+
+# data='
+# key "abcx"
+# vtx "vt" :
+# 	key "abc" :
+# 		key2 "abc" :
+# 			key3 "xx"::2;4
+# 				xa
+# 				xb
+# 				xc
+# 			key4 "test"
+# 			xx
+# 		abc
+# 	abc
+# vt
+# top level "abc" :
+# 	key "abc" :
+# 		key2 "abc":0:0
+# 			key3 "xx"
+# 				xa
+# 				xb
+# 				xc
+# 	    			key4 "test"
+# 			xx
+# 		abc
+# 	abc
+# abc
+#
+# top level 2 "abc" :0
+#
+# abc
+# b
+# c
+#  vt
+# x
+# key ""
+# top level "   aabba"
+#
+# '
+# #echo -n "$data" | linekey_parser "key"
+# echo -n "$data" | linekey_parser "top level 2"
+
+# Generate value with all characters
+value=$(generate_all_characters_and_whitespace)
+
+# Generate key with all characters, except double quote
+key=$(generate_all_characters_and_whitespace | tr -d '"')
+
+trailing=$(generate_all_characters_and_whitespace | tr -d '"')
+
+data_template1='
+unrelated-key1 "random_value1"
+unrelated-key2 "random_value2"
+'
+data_template2='
+unrelated-key3 "random_value3"
+unrelated-key4 "random_value4"
+some other data
+'
+
+#-------------------------------------------------------------------------#
+#                                  Test 1                                 #
+#-------------------------------------------------------------------------#
+
+echo
+echo "Testing single line syntax"
+while IFS= read -r line; do
+	data="${data_template1}${line}${data_template2}"
+	general_check_by_key_against_cases 1 "$key" "$line" "$data" "../src/lkcp"
+done < <(generate_combinations_singleline_syntax "$key" "$value" "$trailing")
+
+#-------------------------------------------------------------------------#
+#                                  Test 2                                 #
+#-------------------------------------------------------------------------#
+
+echo
+echo "Testing multiline syntax"
+while IFS= read -r line; do
+	data="${data_template1}${line}${data_template2}"
+	general_check_by_key_against_cases 1 "$key" "$line" "$data" "../src/lkcp" 1
+done < <(generate_combinations_multiline_syntax "$key" "" "$trailing")
+
+#-------------------------------------------------------------------------#
+#                                  Test 3                                 #
+#-------------------------------------------------------------------------#
+
+echo
+echo "Testing getting multiline value"
+while IFS= read -r line; do
+	data="${data_template1}${line}${data_template2}"
+	general_check_by_key_against_cases 1 "$key" "$line" "$data" "../src/lkcp" 1
+done < <(generate_combinations_multiline_syntax "$key" "" "$trailing")
+
+#-------------------------------------------------------------------------#
+#                                  Test 4                                 #
+#-------------------------------------------------------------------------#
+
+echo
+echo "Test getting single line value"
+while IFS= read -r line; do
+	data="${data_template1}${line}${data_template2}"
+	general_check_by_key_against_cases 1 "$key" "$line" "$data" "../src/lkcp" 1
+done < <(generate_combinations_singleline_syntax "$key" "$value" "$trailing")
+
+#-------------------------------------------------------------------------#
+#                                  Test 5                                 #
+#-------------------------------------------------------------------------#
+
+echo
+echo "Test getting multi line value"
+while IFS= read -r line; do
+	data="${data_template1}${line}${data_template2}"
+	general_check_by_key_against_cases 1 "$key" "$line" "$data" "../src/lkcp" 1
+done < <(generate_combinations_multiline_with_selector_syntax "$key" "" "$trailing" 2 2)
+
+#-------------------------------------------------------------------------#
+#                                  Test 6                                 #
+#-------------------------------------------------------------------------#
+
+data_template1='
+unrelated-key1 "random_value1"
+unrelated-key2 "random_value2"
+'
+data_template2='
+unrelated-key3 "random_value3"
+unrelated-key4 "random_value4"
+some other unrelated data
+xend
+'
+echo
+echo "Test getting multi line value by value terminator"
+while IFS= read -r line; do
+	data="${data_template1}${line}${data_template2}"
+	general_check_by_key_against_cases 1 "$key" "$line" "$data" "../src/lkcp" 1
+done < <(generate_combinations_multiline_with_value_terminator "$key" "xend" "$trailing")

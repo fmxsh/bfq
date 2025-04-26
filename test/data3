@@ -1,0 +1,17 @@
+test "aaaa":
+	key1:
+		key2:
+			key3:
+				val1 "asdad/key3
+
+		 key2
+		abc
+		valx " 1.2
+		valy " null
+		empty " "
+		valz " true
+		valzy " true/key1
+keyx:
+1/keyx
+dfsfd/aaaa
+

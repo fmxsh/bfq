@@ -1,0 +1,30 @@
+
+declare::pre::
+	pre1
+	pre2
+	pre3
+.
+
+declare::test::
+	
+	line1
+	line2
+	line3
+	include::pre
+.
+
+declare::other1::
+	oline1
+	oline2
+	oline3
+.
+declare::test2::
+	include::other1
+	abc
+	include::test
+.
+
+
+key 1::
+	include::test2
+.

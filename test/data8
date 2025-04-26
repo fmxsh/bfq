@@ -1,0 +1,28 @@
+include::my-block::
+contetn
+:
+
+
+::r:
+xxabc
+   
+def.r
+:x:
+	1
+	2
+	3
+	4
+	5
+x
+
+
+
+::r:
+abc
+   
+def.r
+:x:
+    include my stuff.x
+
+
+

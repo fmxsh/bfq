@@ -1,0 +1,8 @@
+declare::key: abcd 
+
+test::
+	include::key
+.
+
+parser::awake
+test: x

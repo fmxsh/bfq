@@ -1,0 +1,28 @@
+
+::xx:
+abc
+def
+xx
+::
+"123"
+456
+.
+
+key::
+	:abc:
+		111
+		222
+	:abc
+	xx
+	""::
+		xyz
+		123
+	:
+	key2:x:
+		e1
+		e2
+	x
+
+	abcx
+
+:

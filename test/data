@@ -1,0 +1,58 @@
+key "abcx"
+vtx "abc" :
+ 	key "abc" :
+ 		key2 "abc" :
+ 			key3 "xx":
+ 				xa
+ 				xb
+ 				xc
+				keyt "test" 
+				keyt "test" 
+ 			key4 "test"
+ 			xx
+ 		abc
+ 	abc
+abc
+
+users:
+
+/users
+
+key5 "abc" :
+		abc for 5
+abc
+
+top "abc" :
+ 	apples
+	bananas
+	cherries
+ 	key "abc" :
+		car
+ 		key2 "abc" :
+			keyx "xx":
+				xxa
+				xxb
+			xx
+ 			key3 "xx" :
+				xa
+ 				xb
+ 				xc
+ 				key4 "test" /xx
+			keyx2 "xx": /asdasd
+				xxa
+				xxb
+				xxc
+				xxd
+			xx
+ 		abc
+		bike
+		key4 "end1":
+		abc
+		/end1
+	abc
+	abababa
+	ABA
+abc
+
+
+

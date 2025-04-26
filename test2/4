@@ -1,0 +1,13 @@
+plants::
+    fruits::
+        apple: 1
+        banana: 2
+        orange: 3
+    .
+    berries::
+        strawberry: 1
+        blueberry: 2
+        raspberry: 3
+    .
+.
+

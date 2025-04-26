@@ -1,0 +1,3 @@
+cat data8 | ../src/lkcp2  "$(printf 'abc\n   \ndef')"
+
+for ml key ml lit

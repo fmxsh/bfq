@@ -1,0 +1,13 @@
+
+key::
+	-- This is another comment
+	a
+	b -- This is another
+	c -- This is a commnet
+	keyx:x:
+		1 -- This is a comment
+		2
+		3
+	.x	
+	
+.
